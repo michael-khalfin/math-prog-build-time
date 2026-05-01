@@ -19,6 +19,9 @@ import examples.example_13_inter_sum as ex13
 import examples.example_14_three_var_intra as ex14
 import examples.example_15_mixed_shape_intra as ex15
 import examples.example_16_indexed_subset as ex16
+import examples.example_17_subset_tuple as ex17
+import examples.example_18_lhs_equality as ex18
+import examples.example_19_jk_secretary as ex19
 
 from translator import translate, solve, populate_pyomo
 from pyomo.environ import SolverFactory
@@ -123,6 +126,9 @@ if __name__ == "__main__":
         (ex14, "Example 14 (Three-Var Intra)"),
         (ex15, "Example 15 (Mixed-Shape Intra)"),
         (ex16, "Example 16 (Indexed Subset)"),
+        (ex17, "Example 17 (Subset Tuple)"),
+        (ex18, "Example 18 (LHS Equality)"),
+        (ex19, "Example 19 (JK Secretary)"),
     ]
 
     failed = []

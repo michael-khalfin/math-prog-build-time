@@ -52,6 +52,7 @@ class SumTermInfo:
     iter_is_indexed: bool
     iter_index_arg: Optional[str]  # subscript arg when indexed
     var_subscript_args: list = field(default_factory=list)  # args in m.var[a, b, c]
+    scalar_coeff: float = 1.0   # constant multiplier e.g. 0.1 * var
     # Intra-sum linear combination: all (var_name, param_name, subscript_args, sign) terms
     # sign is +1 or -1; populated when elt is any linear combination of vars
     intra_terms: list = field(default_factory=list)
@@ -83,6 +84,7 @@ class ObjInfo:
     pyomo_name: str
     sense: str                     # 'MINIMIZE' | 'MAXIMIZE'
     lhs_terms: list = field(default_factory=list)
+    signs: list = field(default_factory=list)  # +1 or -1 per term
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +116,24 @@ def _node_is_data_subscript(node) -> Optional[str]:
         if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
             return sl.value
     return None
+
+
+def _node_is_data_method_call(node) -> Optional[str]:
+    """If node is `list(data['key'].keys())` or similar, return 'key', else None.
+    Handles list(data['key'].keys()), list(data['key'].values()), list(data['key'].items()).
+    """
+    if not (isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ('list', 'sorted', 'tuple')):
+        return None
+    if not node.args:
+        return None
+    inner = node.args[0]
+    if not (isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr in ('keys', 'values', 'items')):
+        return None
+    return _node_is_data_subscript(inner.func.value)
 
 
 def _extract_keyword(call_node, kw_name):
@@ -234,7 +254,9 @@ class _Translator:
         data_key = None
         init_kw = _extract_keyword(call, 'initialize')
         if init_kw is not None:
-            data_key = _node_is_data_subscript(init_kw) or name
+            data_key = (_node_is_data_subscript(init_kw)
+                        or _node_is_data_method_call(init_kw)
+                        or name)
 
         dimen = 1
         dimen_kw = _extract_keyword(call, 'dimen')
@@ -548,17 +570,30 @@ class _RuleClassifier:
                 return_node = stmt.value
         if return_node is None:
             return
-        obj.lhs_terms = self._collect_all_sum_terms(return_node)
+        signed = self._collect_signed_sum_terms(return_node)
+        obj.lhs_terms = [t for t, _s in signed]
+        obj.signs = [s for _t, s in signed]
 
     def classify_obj_inline(self, obj: ObjInfo, expr_node: ast.expr):
-        """Handle pyo.Objective(expr=...) — expression may be sum_A + sum_B."""
-        obj.lhs_terms = self._collect_all_sum_terms(expr_node)
+        """Handle pyo.Objective(expr=...) — expression may be sum_A +/- sum_B."""
+        signed = self._collect_signed_sum_terms(expr_node)
+        obj.lhs_terms = [t for t, _s in signed]
+        obj.signs = [s for _t, s in signed]
 
     def _collect_all_sum_terms(self, node: ast.expr) -> list:
         """Recursively collect one SumTermInfo per sum() call in a BinOp(Add) tree."""
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             return self._collect_all_sum_terms(node.left) + self._collect_all_sum_terms(node.right)
         return self._parse_first_generator(node)
+
+    def _collect_signed_sum_terms(self, node: ast.expr) -> list:
+        """Collect (SumTermInfo, sign) pairs from a tree of Add/Sub sum() calls.
+        sign is +1 for additive terms and -1 for subtracted terms."""
+        result = []
+        for leaf, sign in _collect_signed_terms(node):
+            for term in self._parse_first_generator(leaf):
+                result.append((term, sign))
+        return result
 
     def _parse_first_generator(self, node: ast.expr) -> list:
         """Return a list with the first parseable SumTermInfo from a sum() call."""
@@ -636,8 +671,12 @@ class _RuleClassifier:
             elif vn and vn in self.t.params:
                 param_name = vn
         elif isinstance(elt, ast.BinOp) and isinstance(elt.op, ast.Mult):
-            # param * var  or  var * param
+            # param * var  or  var * param  or  constant * var
+            scalar_coeff_val = 1.0
             for side in [elt.left, elt.right]:
+                if isinstance(side, ast.Constant) and isinstance(side.value, (int, float)):
+                    scalar_coeff_val = float(side.value)
+                    continue
                 if not isinstance(side, ast.Subscript):
                     continue
                 attr = _node_is_m_attr(side.value)
@@ -657,6 +696,8 @@ class _RuleClassifier:
         if var_name is None:
             return None
 
+        # scalar_coeff_val is set in the Mult branch above; default 1.0 otherwise
+        coeff = locals().get('scalar_coeff_val', 1.0)
         return SumTermInfo(
             var_name=var_name,
             param_name=param_name,
@@ -665,6 +706,7 @@ class _RuleClassifier:
             iter_is_indexed=iter_is_indexed,
             iter_index_arg=iter_index_arg,
             var_subscript_args=var_subscript_args,
+            scalar_coeff=coeff,
             intra_terms=intra_terms,
         )
 
@@ -952,22 +994,48 @@ class _CodeGen:
         obj = self.t.obj
         if not obj.lhs_terms:
             return
+        signs = obj.signs if obj.signs else [1] * len(obj.lhs_terms)
         self._emit('# Objective')
         part_vars = []
-        for i, term in enumerate(obj.lhs_terms):
+        part_signs = []
+        for i, (term, sign) in enumerate(zip(obj.lhs_terms, signs)):
             pi = self.t.params.get(term.param_name) if term.param_name else None
+            vi = self.t.vars.get(term.var_name)
             df_var = f'df_{term.var_name}'
             part = f'_obj_t{i}'
+            coeff = term.scalar_coeff
             if pi and pi.index_sets:
-                on_dim = self.r.names_for(pi.index_sets[0])[0]
                 param_col = pi.pyomo_name.lower()
                 joined = f'df_{term.var_name}_obj_{i}'
-                self._emit(f"{joined} = {df_var}.join(s_{pi.pyomo_name.lower()}, on='{on_dim}')")
-                self._emit(f"{part} = ({joined}['{param_col}'] * {joined}['{term.var_name}']).sum()")
+                # Determine join style: full-index alignment vs broadcast
+                param_dims = []
+                for ps in pi.index_sets:
+                    param_dims.extend(self.r.names_for(ps))
+                all_var_dims = self.r.all_names_for_var(vi) if vi else []
+                if sorted(param_dims) == sorted(all_var_dims):
+                    self._emit(f"{joined} = {df_var}.join(s_{pi.pyomo_name.lower()})")
+                elif len(param_dims) == 1:
+                    self._emit(f"{joined} = {df_var}.join(s_{pi.pyomo_name.lower()}, on='{param_dims[0]}')")
+                else:
+                    on_repr = '[' + ', '.join(f"'{d}'" for d in param_dims) + ']'
+                    self._emit(f"{joined} = {df_var}.join(s_{pi.pyomo_name.lower()}, on={on_repr})")
+                inner = f"{joined}['{param_col}'] * {joined}['{term.var_name}']"
+                inner = f"{coeff} * {inner}" if coeff != 1.0 else inner
+                self._emit(f"{part} = ({inner}).sum()")
             else:
-                self._emit(f"{part} = {df_var}['{term.var_name}'].sum()")
+                inner = f"{df_var}['{term.var_name}']"
+                inner = f"{coeff} * {inner}" if coeff != 1.0 else inner
+                self._emit(f"{part} = ({inner}).sum()")
             part_vars.append(part)
-        obj_expr = ' + '.join(part_vars)
+            part_signs.append(sign)
+        # Assemble signed objective expression
+        obj_parts = []
+        for pv, sign in zip(part_vars, part_signs):
+            if not obj_parts:
+                obj_parts.append(f"-{pv}" if sign < 0 else pv)
+            else:
+                obj_parts.append(f"- {pv}" if sign < 0 else f"+ {pv}")
+        obj_expr = ' '.join(obj_parts)
         sense_str = f"gp.GRB.{'MINIMIZE' if obj.sense == 'MINIMIZE' else 'MAXIMIZE'}"
         self._emit(f"m.setObjective({obj_expr}, {sense_str})")
         self._emit()
@@ -1119,6 +1187,13 @@ class _CodeGen:
 
         term = terms[0]
         pi = self.t.params[term.param_name] if term.param_name else None
+
+        # When LHS is a direct var and RHS is an indexed-set sum (no param),
+        # use the P5-style flatten+merge+groupby pipeline.
+        if rhs_is_var and term.iter_is_indexed and not pi:
+            self._gen_P4_indexed_rhs(ci, term)
+            return
+
         vi = self.t.vars[term.var_name]
         df_var = f'df_{term.var_name}'
 
@@ -1132,14 +1207,18 @@ class _CodeGen:
             flat_var = f'df_{term.var_name}_flat_{suffix}'
             join_df = f'df_join_{suffix}'
 
-            # Join key: the loop var (shared dimension between param and var)
+            # Join key: the loop var (shared dimension between param and var),
+            # restricted to the variable's actual index columns (handles tuple projection).
+            var_index_names = self.r.all_names_for_var(vi)
             loop_v = term.loop_var
             if isinstance(loop_v, list):
-                on_key = loop_v
-                on_repr = '[' + ', '.join(f"'{k}'" for k in loop_v) + ']'
+                on_key = [k for k in loop_v if k in var_index_names]
             else:
-                on_key = [loop_v]
-                on_repr = f"'{loop_v}'"
+                on_key = [loop_v] if loop_v in var_index_names else [loop_v]
+            if len(on_key) == 1:
+                on_repr = f"'{on_key[0]}'"
+            else:
+                on_repr = '[' + ', '.join(f"'{k}'" for k in on_key) + ']'
 
             self._emit(f"{flat_param} = {param_s}.reset_index()")
             self._emit(f"{flat_var} = {df_var}['{term.var_name}'].reset_index()")
@@ -1157,8 +1236,7 @@ class _CodeGen:
                 f"{lhs_var} = ({join_df}['{param_col}'] * {join_df}['{term.var_name}']).groupby({keys_repr}).sum()"
             )
         else:
-            # No param — pure sum over indexed set
-            # Not typical but handle gracefully
+            # No param — pure sum over indexed set (non-indexed case)
             constr_names = []
             for s in ci.index_sets:
                 constr_names.extend(self.r.names_for(s))
@@ -1168,7 +1246,6 @@ class _CodeGen:
         # Now determine RHS representation
         if rhs_is_var:
             # RHS is the direct var variable
-            rhs_vi = self.t.vars[ci.lhs_direct_var]
             rhs_df = f'df_{ci.lhs_direct_var}'
             rhs_repr = f"{rhs_df}['{ci.lhs_direct_var}']"
             sense = _gurobi_sense(ci.op)
@@ -1193,6 +1270,105 @@ class _CodeGen:
                     rhs_repr = aligned_var
             sense = _gurobi_sense(ci.op)
             self._emit(f"gppd.add_constrs(m, {lhs_var}, {sense}, {rhs_repr}, name='{ci.pyomo_name}')")
+
+    # ------------------------------------------------------------------
+    def _gen_P4_indexed_rhs(self, ci: ConstrInfo, term: SumTermInfo):
+        """Handle var == sum(y[...] for ... in Rel[...]) using P5-like pipeline.
+
+        Called when LHS is a direct variable and RHS is a sum over an indexed
+        relation set with no param weight — same flatten+merge+groupby as P5
+        but the constraint is emitted with the direct var on the LHS.
+        """
+        vi = self.t.vars[term.var_name]
+        df_var = f'df_{term.var_name}'
+        si = self.t.sets.get(term.iter_set)
+        data_key = si.data_key if si else term.iter_set
+        suffix = ci.pyomo_name
+
+        # Outer names (constraint index)
+        full_outer_names = []
+        for s in ci.index_sets:
+            full_outer_names.extend(self.r.names_for(s))
+
+        # Parent set of the relation (what the outer key indexes)
+        parent_set_name = si.index_set if si else None
+        if parent_set_name:
+            map_outer_names = self.r.names_for(parent_set_name)
+        else:
+            map_outer_names = full_outer_names
+
+        var_index_names = self.r.all_names_for_var(vi)
+        subscript_args = term.var_subscript_args
+        loop_vars_flat = term.loop_var if isinstance(term.loop_var, list) else [term.loop_var]
+
+        # Inner col names (from subscript args not in rule args, mapped to registry names)
+        inner_registry = []
+        inner_loop_vars = []
+        for i, arg in enumerate(subscript_args):
+            if arg not in ci.rule_args:
+                inner_registry.append(var_index_names[i] if i < len(var_index_names) else arg)
+                lv_idx = loop_vars_flat.index(arg) if arg in loop_vars_flat else len(inner_registry) - 1
+                inner_loop_vars.append(loop_vars_flat[lv_idx] if lv_idx < len(loop_vars_flat) else arg)
+
+        inner_col_names = []
+        rename_map = {}
+        for reg, lv in zip(inner_registry, inner_loop_vars):
+            inner_col_names.append(lv)
+            if reg != lv:
+                rename_map[reg] = lv
+
+        # Build mapping DataFrame using all loop var fields (handles projection)
+        map_df = f'df_map_{suffix}'
+        all_loop_var_names = loop_vars_flat
+        map_col_names = map_outer_names + all_loop_var_names
+
+        if len(map_outer_names) == 1:
+            outer_var = map_outer_names[0]
+        else:
+            outer_var = '(' + ', '.join(map_outer_names) + ')'
+
+        if len(all_loop_var_names) == 1:
+            inner_var = all_loop_var_names[0]
+        else:
+            inner_var = '(' + ', '.join(all_loop_var_names) + ')'
+
+        row_parts = map_outer_names + all_loop_var_names
+        row_tuple = '(' + ', '.join(row_parts) + ')'
+        cols_repr = '[' + ', '.join(f"'{c}'" for c in map_col_names) + ']'
+
+        self._emit(f"_mapping_{suffix} = [{row_tuple} for {outer_var}, _inner in data['{data_key}'].items() for {inner_var} in _inner]")
+        self._emit(f"{map_df} = pd.DataFrame(_mapping_{suffix}, columns={cols_repr})")
+
+        # Flatten variable; rename conflicting index columns
+        reset_df = f'df_reset_{suffix}'
+        if rename_map:
+            rename_repr = '{' + ', '.join(f"'{k}': '{v}'" for k, v in rename_map.items()) + '}'
+            self._emit(f"{reset_df} = {df_var}['{term.var_name}'].reset_index().rename(columns={rename_repr})")
+        else:
+            self._emit(f"{reset_df} = {df_var}['{term.var_name}'].reset_index()")
+
+        # Merge on inner col names plus any outer index cols also in the variable
+        lagged_df = f'df_lagged_{suffix}'
+        all_var_names_post_rename = [rename_map.get(n, n) for n in var_index_names]
+        extra_on = [n for n in map_outer_names if n in all_var_names_post_rename]
+        merge_on = inner_col_names + extra_on
+        if len(merge_on) == 1:
+            on_repr = f"'{merge_on[0]}'"
+        else:
+            on_repr = '[' + ', '.join(f"'{c}'" for c in merge_on) + ']'
+        self._emit(f"{lagged_df} = pd.merge({map_df}, {reset_df}, on={on_repr})")
+
+        # Groupby outer names, sum
+        rhs_sum_var = f'rhs_{suffix}'
+        keys_repr = '[' + ', '.join(f"'{k}'" for k in full_outer_names) + ']'
+        self._emit(f"{rhs_sum_var} = {lagged_df}.groupby({keys_repr})['{term.var_name}'].sum()")
+
+        # Reindex against the LHS direct var's index
+        lhs_df = f'df_{ci.lhs_direct_var}'
+        self._emit(f"{rhs_sum_var} = {rhs_sum_var}.reindex({lhs_df}.index, fill_value=0.0)")
+
+        sense = _gurobi_sense(ci.op)
+        self._emit(f"gppd.add_constrs(m, {lhs_df}['{ci.lhs_direct_var}'], {sense}, {rhs_sum_var}, name='{ci.pyomo_name}')")
 
     # ------------------------------------------------------------------
     def _gen_P5(self, ci: ConstrInfo):
@@ -1240,19 +1416,23 @@ class _CodeGen:
                 lv_idx = loop_vars_flat.index(arg) if arg in loop_vars_flat else len(inner_registry) - 1
                 inner_loop_vars.append(loop_vars_flat[lv_idx] if lv_idx < len(loop_vars_flat) else arg)
 
-        # Resolve naming conflicts: if inner registry name == outer name, use loop var name instead
+        # Use loop var names as the column names in the mapping DataFrame so that:
+        # 1. The comprehension correctly unpacks ALL loop var fields (projection support).
+        # 2. The variable reset_index is renamed to match these names (merge alignment).
+        # rename_map covers BOTH outer-name conflicts AND cases where registry name ≠ loop var name.
         inner_col_names = []
-        rename_map = {}  # var's registry col → col name to use in reset_index
+        rename_map = {}  # var's registry col → loop var col name to use after reset_index
         for reg, lv in zip(inner_registry, inner_loop_vars):
-            if reg in full_outer_names:
-                inner_col_names.append(lv)
-                rename_map[reg] = lv
-            else:
-                inner_col_names.append(reg)
+            inner_col_names.append(lv)       # always use loop var name as the column
+            if reg != lv:
+                rename_map[reg] = lv          # rename variable index col to match
 
         # --- 3. Build relation mapping DataFrame ---
+        # Use ALL loop var fields for comprehension unpacking (handles projection:
+        # e.g., loop (f,w,s) but var subscript [f,s] — must unpack all three).
         map_df = f'df_map_{suffix}'
-        map_col_names = map_outer_names + inner_col_names
+        all_loop_var_names = loop_vars_flat  # full tuple, may be superset of inner_col_names
+        map_col_names = map_outer_names + all_loop_var_names
 
         # Outer iteration variable(s) in the comprehension
         if len(map_outer_names) == 1:
@@ -1260,14 +1440,14 @@ class _CodeGen:
         else:
             outer_var = '(' + ', '.join(map_outer_names) + ')'
 
-        # Inner iteration variable(s) in the comprehension
-        if len(inner_col_names) == 1:
-            inner_var = inner_col_names[0]
+        # Inner iteration variable(s) — unpack all loop var fields
+        if len(all_loop_var_names) == 1:
+            inner_var = all_loop_var_names[0]
         else:
-            inner_var = '(' + ', '.join(inner_col_names) + ')'
+            inner_var = '(' + ', '.join(all_loop_var_names) + ')'
 
         # Full row tuple in the comprehension
-        row_parts = map_outer_names + inner_col_names
+        row_parts = map_outer_names + all_loop_var_names
         row_tuple = '(' + ', '.join(row_parts) + ')'
 
         cols_repr = '[' + ', '.join(f"'{c}'" for c in map_col_names) + ']'

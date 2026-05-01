@@ -9,6 +9,9 @@ import examples.example_8_index_alignment as example_8_index_alignment
 import examples.example_11_multi_term as example_11_multi_term
 import examples.example_12_intra_sum as example_12_intra_sum
 import examples.example_13_inter_sum as example_13_inter_sum
+import examples.example_17_subset_tuple as example_17_subset_tuple
+import examples.example_18_lhs_equality as example_18_lhs_equality
+import examples.example_19_jk_secretary as example_19_jk_secretary
 from pyomo.environ import SolverFactory
 
 def test_model_equivalence(module, name):
@@ -48,3 +51,6 @@ if __name__ == "__main__":
     test_model_equivalence(example_11_multi_term, "Example 11 (Multi-Term)")
     test_model_equivalence(example_12_intra_sum, "Example 12 (Intra-Sum)")
     test_model_equivalence(example_13_inter_sum, "Example 13 (Inter-Sum)")
+    test_model_equivalence(example_17_subset_tuple, "Example 17 (Subset Tuple)")
+    test_model_equivalence(example_18_lhs_equality, "Example 18 (LHS Equality)")
+    test_model_equivalence(example_19_jk_secretary, "Example 19 (JK Secretary)")
