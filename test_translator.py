@@ -9,6 +9,11 @@ import examples.example_2_network as ex2
 import examples.example_3_multiflow as ex3
 import examples.example_4_bom as ex4
 import examples.example_5_shifts as ex5
+import examples.example_6_set_cover as ex6
+import examples.example_7_tuple_relation as ex7
+import examples.example_8_index_alignment as ex8
+import examples.example_9_inline_p3 as ex9
+import examples.example_10_weighted_groupby as ex10
 
 from translator import translate
 from pyomo.environ import SolverFactory
@@ -54,6 +59,11 @@ if __name__ == "__main__":
         (ex3, "Example 3 (Multiflow)"),
         (ex4, "Example 4 (BOM)"),
         (ex5, "Example 5 (Shifts)"),
+        (ex6, "Example 6 (Set Cover)"),
+        (ex7, "Example 7 (Tuple Relation)"),
+        (ex8, "Example 8 (Index Alignment)"),
+        (ex9, "Example 9 (Inline P3)"),
+        (ex10, "Example 10 (Weighted Groupby)"),
     ]
     failed = []
     for module, name in examples:

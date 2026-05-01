@@ -3,6 +3,9 @@ import examples.example_2_network as example_2_network
 import examples.example_3_multiflow as example_3_multiflow
 import examples.example_4_bom as example_4_bom
 import examples.example_5_shifts as example_5_shifts
+import examples.example_6_set_cover as example_6_set_cover
+import examples.example_7_tuple_relation as example_7_tuple_relation
+import examples.example_8_index_alignment as example_8_index_alignment
 from pyomo.environ import SolverFactory
 
 def test_model_equivalence(module, name):
@@ -36,3 +39,6 @@ if __name__ == "__main__":
     test_model_equivalence(example_3_multiflow, "Example 3 (Multiflow)")
     test_model_equivalence(example_4_bom, "Example 4 (BOM)")
     test_model_equivalence(example_5_shifts, "Example 5 (Shifts)")
+    test_model_equivalence(example_6_set_cover, "Example 6 (Set Cover)")
+    test_model_equivalence(example_7_tuple_relation, "Example 7 (Tuple Relation)")
+    test_model_equivalence(example_8_index_alignment, "Example 8 (Index Alignment)")

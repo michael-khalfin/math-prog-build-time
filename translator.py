@@ -51,6 +51,7 @@ class SumTermInfo:
     iter_set: str
     iter_is_indexed: bool
     iter_index_arg: Optional[str]  # subscript arg when indexed
+    var_subscript_args: list = field(default_factory=list)  # args in m.var[a, b, c]
 
 
 @dataclass
@@ -70,6 +71,8 @@ class ConstrInfo:
     # For P4 where LHS is a direct var (component balance) — swap sides
     lhs_is_direct_var: bool = False
     rhs_terms: list = field(default_factory=list)  # RHS sum terms when swapped
+    # For pyo.Constraint(expr=...) — direct expression, no rule function
+    inline_expr: object = None
 
 
 @dataclass
@@ -115,6 +118,18 @@ def _extract_keyword(call_node, kw_name):
         if kw.arg == kw_name:
             return kw.value
     return None
+
+
+def _extract_subscript_args(subscript_node: ast.Subscript) -> list:
+    """Return identifier names from m.var[a, b, c] — used to map loop vars to index positions."""
+    sl = subscript_node.slice
+    if isinstance(sl, ast.Index):   # Python < 3.9 wraps in ast.Index
+        sl = sl.value
+    if isinstance(sl, ast.Tuple):
+        return [e.id for e in sl.elts if isinstance(e, ast.Name)]
+    if isinstance(sl, ast.Name):
+        return [sl.id]
+    return []
 
 
 def _op_str(op_node) -> str:
@@ -263,8 +278,11 @@ class _Translator:
             d = _node_is_m_attr(domain_kw)
             if d is None and isinstance(domain_kw, ast.Attribute):
                 d = domain_kw.attr
-            if d and 'Integer' in d:
-                vtype = 'INTEGER'
+            if d:
+                if 'Integer' in d:
+                    vtype = 'INTEGER'
+                elif 'Binary' in d:
+                    vtype = 'BINARY'
 
         self.vars[name] = VarInfo(pyomo_name=name, index_sets=index_sets, vtype=vtype)
         self._var_order.append(name)
@@ -286,11 +304,15 @@ class _Translator:
             args = [a.arg for a in rfunc.args.args]
             rule_args = [a for a in args if a != 'm']
 
+        # Check for expr= (scalar inline expression, no rule function)
+        inline_expr = _extract_keyword(call, 'expr')
+
         self.constrs.append(ConstrInfo(
             pyomo_name=name,
             index_sets=index_sets,
             rule_name=rule_name,
             rule_args=rule_args,
+            inline_expr=inline_expr,
         ))
 
     def _parse_objective(self, name: str, call: ast.Call):
@@ -313,7 +335,9 @@ class _Translator:
     def classify(self):
         classifier = _RuleClassifier(self)
         for ci in self.constrs:
-            if ci.rule_name and ci.rule_name in self._rules:
+            if ci.inline_expr is not None:
+                classifier.classify_inline(ci)
+            elif ci.rule_name and ci.rule_name in self._rules:
                 classifier.classify_constr(ci, self._rules[ci.rule_name])
         if self.obj and hasattr(self.obj, '_rule_name'):
             rn = self.obj._rule_name
@@ -373,21 +397,23 @@ class _RuleClassifier:
 
         # --- Determine pattern ---
 
-        # P3: BinOp(Name - Name) on LHS, where both Names are sum() assigns
-        if (isinstance(lhs_node, ast.BinOp)
-                and isinstance(lhs_node.op, ast.Sub)
-                and isinstance(lhs_node.left, ast.Name)
-                and isinstance(lhs_node.right, ast.Name)):
-            left_name = lhs_node.left.id
-            right_name = lhs_node.right.id
-            if left_name in assigns and right_name in assigns:
+        # P3: BinOp(Sub) on LHS — handles both named intermediates and inline sums.
+        # Named:  flow_out = sum(...); flow_in = sum(...); return flow_out - flow_in == rhs
+        # Inline: return (sum(...) - sum(...)) == rhs
+        if isinstance(lhs_node, ast.BinOp) and isinstance(lhs_node.op, ast.Sub):
+            left_node  = lhs_node.left
+            right_node = lhs_node.right
+            # Resolve named intermediate variables to their call expressions
+            if isinstance(left_node, ast.Name) and left_node.id in assigns:
+                left_node = assigns[left_node.id]
+            if isinstance(right_node, ast.Name) and right_node.id in assigns:
+                right_node = assigns[right_node.id]
+            left_term  = self._parse_sum_call(left_node)
+            right_term = self._parse_sum_call(right_node)
+            if left_term is not None and right_term is not None:
                 ci.pattern = 'P3'
                 ci.flow_sub = True
-                ci.flow_term_names = [left_name, right_name]
-                for vname in [left_name, right_name]:
-                    term = self._parse_sum_call(assigns[vname])
-                    if term:
-                        ci.lhs_terms.append(term)
+                ci.lhs_terms = [left_term, right_term]
                 return
 
         # P4b / P6: LHS is m.var[...] (direct var access)
@@ -424,6 +450,31 @@ class _RuleClassifier:
             return
 
         # Fallback: treat as P6
+        ci.pattern = 'P6'
+
+    def classify_inline(self, ci: ConstrInfo):
+        """Handle pyo.Constraint(expr=...) — a direct Compare expression."""
+        expr_node = ci.inline_expr
+        if not isinstance(expr_node, ast.Compare):
+            return
+        if len(expr_node.ops) > 1:
+            raise NotImplementedError(
+                "Chained comparisons are not supported; use single binary comparisons only."
+            )
+        ci.op = _op_str(expr_node.ops[0])
+        lhs_node = expr_node.left
+        ci.rhs_node = expr_node.comparators[0]
+
+        lhs_sum = self._parse_sum_call(lhs_node)
+        if lhs_sum is not None:
+            ci.lhs_terms.append(lhs_sum)
+            if lhs_sum.iter_is_indexed:
+                ci.pattern = 'P4' if lhs_sum.param_name else 'P5'
+            elif not ci.rule_args:
+                ci.pattern = 'P2'
+            else:
+                ci.pattern = 'P1'
+            return
         ci.pattern = 'P6'
 
     def classify_obj(self, obj: ObjInfo, rfunc: ast.FunctionDef):
@@ -502,25 +553,29 @@ class _RuleClassifier:
         if iter_set is None:
             return None
 
-        # Extract var_name and param_name from elt
+        # Extract var_name, param_name, and var_subscript_args from elt
         var_name = None
         param_name = None
+        var_subscript_args = []
 
         if isinstance(elt, ast.Subscript):
             vn = _node_is_m_attr(elt.value)
             if vn and vn in self.t.vars:
                 var_name = vn
+                var_subscript_args = _extract_subscript_args(elt)
             elif vn and vn in self.t.params:
                 param_name = vn
         elif isinstance(elt, ast.BinOp) and isinstance(elt.op, ast.Mult):
             # param * var  or  var * param
-            left_attr = _node_is_m_attr(elt.left.value) if isinstance(elt.left, ast.Subscript) else None
-            right_attr = _node_is_m_attr(elt.right.value) if isinstance(elt.right, ast.Subscript) else None
-            for attr, is_left in [(left_attr, True), (right_attr, False)]:
+            for side in [elt.left, elt.right]:
+                if not isinstance(side, ast.Subscript):
+                    continue
+                attr = _node_is_m_attr(side.value)
                 if attr is None:
                     continue
                 if attr in self.t.vars:
                     var_name = attr
+                    var_subscript_args = _extract_subscript_args(side)
                 elif attr in self.t.params:
                     param_name = attr
 
@@ -534,6 +589,7 @@ class _RuleClassifier:
             iter_set=iter_set,
             iter_is_indexed=iter_is_indexed,
             iter_index_arg=iter_index_arg,
+            var_subscript_args=var_subscript_args,
         )
 
     def _extract_direct_var(self, node: ast.expr) -> Optional[str]:
@@ -560,10 +616,14 @@ class _IndexRegistry:
         # Pass 1: scan constraint index_sets vs rule_args
         for ci in self.t.constrs:
             self._register_from_constr(ci)
-        # Pass 2: scan sum term loop vars
+        # Pass 2: scan sum term loop vars (registers iteration sets like OutArcs → ['j'])
         for ci in self.t.constrs:
             for term in ci.lhs_terms + ci.rhs_terms:
                 self._register_loop_var(term)
+        # Pass 3: for 2-D variable index sets that never appear as a constraint index
+        # (e.g. Arcs in a P3 balance), derive dimension names from loop-var positions
+        # recorded in var_subscript_args across all terms.
+        self._register_var_dims_from_all_terms()
 
     def _register_from_constr(self, ci: ConstrInfo):
         rule_arg_cursor = 0
@@ -585,6 +645,40 @@ class _IndexRegistry:
                 self.registry[term.iter_set] = lv
             else:
                 self.registry[term.iter_set] = [lv]
+
+    def _register_var_dims_from_all_terms(self):
+        """Derive index-level names for variable index sets that never appear
+        as constraint indices (e.g. a dimen=2 Arcs set used only in P3).
+        For each term, positions in var_subscript_args that are NOT rule args
+        are loop vars — they are the canonical dimension names for those positions."""
+        # Accumulate: pos_names[var_name][abs_position] = canonical name
+        pos_names: dict[str, dict[int, str]] = {}
+        for ci in self.t.constrs:
+            rule_args_set = set(ci.rule_args)
+            for term in ci.lhs_terms + ci.rhs_terms:
+                if not term.var_subscript_args:
+                    continue
+                vname = term.var_name
+                if vname not in pos_names:
+                    pos_names[vname] = {}
+                for pos, arg in enumerate(term.var_subscript_args):
+                    if arg not in rule_args_set and pos not in pos_names[vname]:
+                        pos_names[vname][pos] = arg
+
+        # Register set dimensions using the accumulated position names
+        for vi in self.t.vars.values():
+            if vi.pyomo_name not in pos_names:
+                continue
+            pmap = pos_names[vi.pyomo_name]
+            cursor = 0
+            for set_name in vi.index_sets:
+                si = self.t.sets.get(set_name)
+                dimen = si.dimen if si else 1
+                if set_name not in self.registry:
+                    names = [pmap.get(cursor + k) for k in range(dimen)]
+                    if all(n is not None for n in names):
+                        self.registry[set_name] = names
+                cursor += dimen
 
     def names_for(self, set_name: str) -> list[str]:
         if set_name in self.registry:
@@ -648,7 +742,12 @@ class _CodeGen:
 
     def _emit_var(self, vi: VarInfo):
         all_names = self.r.all_names_for_var(vi)
-        vtype_str = ', vtype=gp.GRB.INTEGER' if vi.vtype == 'INTEGER' else ''
+        if vi.vtype == 'INTEGER':
+            vtype_str = ', vtype=gp.GRB.INTEGER'
+        elif vi.vtype == 'BINARY':
+            vtype_str = ', vtype=gp.GRB.BINARY'
+        else:
+            vtype_str = ''
 
         # Determine if any set has dimen > 1
         has_tuple_set = any(
@@ -795,11 +894,15 @@ class _CodeGen:
 
         if term.param_name:
             pi = self.t.params[term.param_name]
-            # Weighted sum: need to attach param as column, then groupby
-            param_col = f'_param_{ci.pyomo_name}'
-            self._emit(f"{df_var}['{param_col}'] = s_{pi.pyomo_name.lower()}")
+            param_col  = pi.pyomo_name.lower()
+            param_s    = f's_{pi.pyomo_name.lower()}'
+            joined_df  = f'_df_{ci.pyomo_name}_w'
+            # join on the dimension the param is indexed by so the 1-D series
+            # aligns correctly onto a multi-level variable index
+            on_dim = self.r.names_for(pi.index_sets[0])[0] if pi.index_sets else None
+            self._emit(f"{joined_df} = {df_var}.join({param_s}, on='{on_dim}')")
             self._emit(
-                f"{lhs_var} = ({df_var}['{param_col}'] * {df_var}['{term.var_name}']).groupby({keys_repr}).sum()"
+                f"{lhs_var} = ({joined_df}['{param_col}'] * {joined_df}['{term.var_name}']).groupby({keys_repr}).sum()"
             )
         else:
             self._emit(f"{lhs_var} = {df_var}.groupby({keys_repr})['{term.var_name}'].sum()")
@@ -977,7 +1080,14 @@ class _CodeGen:
 
     # ------------------------------------------------------------------
     def _gen_P5(self, ci: ConstrInfo):
-        """Rolling window: indexed set as time mapping."""
+        """Universal adjacency / indexed-relation engine.
+
+        Works for any ∑_{j ∈ Relation[i]} x[...j...] pattern by:
+          1. Flattening the indexed set dict into a relation DataFrame using
+             registry-derived column names (not loop-var names).
+          2. Renaming variable index columns only when a name conflict forces it.
+          3. Reindexing the grouped result against the constraint's full index.
+        """
         term = ci.lhs_terms[0]
         vi = self.t.vars[term.var_name]
         df_var = f'df_{term.var_name}'
@@ -985,34 +1095,123 @@ class _CodeGen:
         data_key = si.data_key if si else term.iter_set
         suffix = ci.pyomo_name
 
-        # iter_index_arg is the outer time index (e.g., 't')
-        outer = term.iter_index_arg if isinstance(term.iter_index_arg, str) else ci.rule_args[-1]
-        inner = term.loop_var if isinstance(term.loop_var, str) else term.loop_var[0]
-
-        map_df = f'df_map_{suffix}'
-        reset_df = f'df_reset_{suffix}'
-        lagged_df = f'df_lagged_{suffix}'
-        lhs_var = f'lhs_{suffix}'
-
-        self._emit(
-            f"_mapping_{suffix} = [({outer}, {inner}) for {outer}, _starts in data['{data_key}'].items() for {inner} in _starts]"
-        )
-        self._emit(f"{map_df} = pd.DataFrame(_mapping_{suffix}, columns=['{outer}', '{inner}'])")
-        self._emit(
-            f"{reset_df} = {df_var}['{term.var_name}'].reset_index().rename(columns={{'{outer}': '{inner}'}})"
-        )
-        self._emit(f"{lagged_df} = pd.merge({reset_df}, {map_df}, on='{inner}')")
-
-        constr_names = []
+        # --- 1. Outer names ---
+        # Full constraint outer names (used for groupby and reindex)
+        full_outer_names = []
         for s in ci.index_sets:
-            constr_names.extend(self.r.names_for(s))
-        keys_repr = '[' + ', '.join(f"'{k}'" for k in constr_names) + ']'
+            full_outer_names.extend(self.r.names_for(s))
+
+        # Mapping outer names = registry names of the iter_set's parent set
+        # (the set that indexes the relation, e.g. m.T indexes m.ValidStarts)
+        parent_set_name = si.index_set if si else None
+        if parent_set_name:
+            map_outer_names = self.r.names_for(parent_set_name)
+        else:
+            map_outer_names = full_outer_names
+
+        # --- 2. Inner names (registry-derived, with conflict resolution) ---
+        var_index_names = self.r.all_names_for_var(vi)
+        subscript_args = term.var_subscript_args   # e.g. ['s', 'tp'] or ['fac'] or ['orig', 'dest']
+        loop_vars_flat = term.loop_var if isinstance(term.loop_var, list) else [term.loop_var]
+
+        # Inner positions: subscript_args positions NOT in rule_args
+        inner_registry = []   # registry name at each inner position
+        inner_loop_vars = []  # corresponding loop var name
+        for i, arg in enumerate(subscript_args):
+            if arg not in ci.rule_args:
+                inner_registry.append(var_index_names[i] if i < len(var_index_names) else arg)
+                # find which loop var this is
+                lv_idx = loop_vars_flat.index(arg) if arg in loop_vars_flat else len(inner_registry) - 1
+                inner_loop_vars.append(loop_vars_flat[lv_idx] if lv_idx < len(loop_vars_flat) else arg)
+
+        # Resolve naming conflicts: if inner registry name == outer name, use loop var name instead
+        inner_col_names = []
+        rename_map = {}  # var's registry col → col name to use in reset_index
+        for reg, lv in zip(inner_registry, inner_loop_vars):
+            if reg in full_outer_names:
+                inner_col_names.append(lv)
+                rename_map[reg] = lv
+            else:
+                inner_col_names.append(reg)
+
+        # --- 3. Build relation mapping DataFrame ---
+        map_df = f'df_map_{suffix}'
+        map_col_names = map_outer_names + inner_col_names
+
+        # Outer iteration variable(s) in the comprehension
+        if len(map_outer_names) == 1:
+            outer_var = map_outer_names[0]
+        else:
+            outer_var = '(' + ', '.join(map_outer_names) + ')'
+
+        # Inner iteration variable(s) in the comprehension
+        if len(inner_col_names) == 1:
+            inner_var = inner_col_names[0]
+        else:
+            inner_var = '(' + ', '.join(inner_col_names) + ')'
+
+        # Full row tuple in the comprehension
+        row_parts = map_outer_names + inner_col_names
+        row_tuple = '(' + ', '.join(row_parts) + ')'
+
+        cols_repr = '[' + ', '.join(f"'{c}'" for c in map_col_names) + ']'
+        self._emit(
+            f"_mapping_{suffix} = [{row_tuple} for {outer_var}, _inner in data['{data_key}'].items() for {inner_var} in _inner]"
+        )
+        self._emit(f"{map_df} = pd.DataFrame(_mapping_{suffix}, columns={cols_repr})")
+
+        # --- 4. Flatten variable; rename conflicting index columns ---
+        reset_df = f'df_reset_{suffix}'
+        if rename_map:
+            rename_repr = '{' + ', '.join(f"'{k}': '{v}'" for k, v in rename_map.items()) + '}'
+            self._emit(f"{reset_df} = {df_var}['{term.var_name}'].reset_index().rename(columns={rename_repr})")
+        else:
+            self._emit(f"{reset_df} = {df_var}['{term.var_name}'].reset_index()")
+
+        # --- 5. Merge on inner column names ---
+        lagged_df = f'df_lagged_{suffix}'
+        if len(inner_col_names) == 1:
+            on_repr = f"'{inner_col_names[0]}'"
+        else:
+            on_repr = '[' + ', '.join(f"'{c}'" for c in inner_col_names) + ']'
+        self._emit(f"{lagged_df} = pd.merge({map_df}, {reset_df}, on={on_repr})")
+
+        # --- 6. Groupby full outer names, sum ---
+        lhs_var = f'lhs_{suffix}'
+        keys_repr = '[' + ', '.join(f"'{k}'" for k in full_outer_names) + ']'
         self._emit(f"{lhs_var} = {lagged_df}.groupby({keys_repr})['{term.var_name}'].sum()")
-        self._emit(f"{lhs_var} = {lhs_var}.reindex({df_var}.index, fill_value=0.0)")
+
+        # --- 7. Reindex against constraint's full index (handles missing outer values) ---
+        constr_idx = f'_idx_{suffix}'
+        self._emit_constr_index(ci, constr_idx)
+        self._emit(f"{lhs_var} = {lhs_var}.reindex({constr_idx}, fill_value=0.0)")
 
         rhs_repr = self._rhs_repr(ci)
         sense = _gurobi_sense(ci.op)
         self._emit(f"gppd.add_constrs(m, {lhs_var}, {sense}, {rhs_repr}, name='{ci.pyomo_name}')")
+
+    def _emit_constr_index(self, ci: ConstrInfo, idx_var: str):
+        """Emit construction of the constraint's full index for reindexing."""
+        if len(ci.index_sets) == 1:
+            s = ci.index_sets[0]
+            si = self.t.sets.get(s)
+            key = si.data_key if si else s
+            names = self.r.names_for(s)
+            if len(names) == 1:
+                self._emit(f"{idx_var} = pd.Index(data['{key}'], name='{names[0]}')")
+            else:
+                names_repr = str(names)
+                self._emit(f"{idx_var} = pd.MultiIndex.from_tuples(data['{key}'], names={names_repr})")
+        else:
+            sets_repr = '[' + ', '.join(
+                f"data['{(self.t.sets.get(s) or SetInfo('', '')).data_key or s}']"
+                for s in ci.index_sets
+            ) + ']'
+            names = []
+            for s in ci.index_sets:
+                names.extend(self.r.names_for(s))
+            names_repr = str(names)
+            self._emit(f"{idx_var} = pd.MultiIndex.from_product({sets_repr}, names={names_repr})")
 
     # ------------------------------------------------------------------
     def _gen_P6(self, ci: ConstrInfo):

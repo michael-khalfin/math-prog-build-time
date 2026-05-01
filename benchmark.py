@@ -1,70 +1,184 @@
-import time
+"""
+Benchmark: Pyomo (Python-loop build) vs gurobipy-pandas (vectorized build)
+==========================================================================
+
+Model: Capacitated multi-commodity flow (example_3_multiflow pattern)
+  - |E| × |K| variables
+  - |E| capacity constraints  (P1 groupby pattern)
+  - |N| × |K| flow-balance constraints (P3 indexed-set subtraction pattern)
+
+The translator converts the Pyomo function to gurobipy-pandas source once,
+offline.  The timed sections measure only model-construction cost.
+
+Tune N_NODES / N_EDGES / N_COMMODITIES to hit the target Pyomo build time.
+Calibration on a typical laptop (M-series Mac, Python 3.12):
+  ~11 000 constraints/second (rule eval + gurobi_persistent compilation)
+  → 660 000 constraints ≈ 60 s
+  → N_NODES=7000, N_EDGES=56000, N_COMMODITIES=50 gives ~420 000 constrs
+"""
+
 import random
-import pandas as pd
+import time
+import sys
+
 import gurobipy as gp
 from pyomo.environ import SolverFactory
-from examples import example_3_multiflow
 
-def generate_massive_data(num_nodes=10**6, num_edges=2*10**6, num_commodities=10):
-    print(f"Generating synthetic data: {num_nodes} nodes, {num_edges} edges...")
-    
-    nodes = [f"N_{i}" for i in range(num_nodes)]
-    commodities = [f"C_{k}" for k in range(num_commodities)]
-    
-    edges = set()
-    while len(edges) < num_edges:
-        i = random.choice(nodes)
-        j = random.choice(nodes)
-        if i != j:
-            edges.add((i, j))
-    edges = list(edges)
-    
-    capacity = {e: random.randint(10, 100) for e in edges}
-    
-    # Isolate only connected nodes to prevent Pyomo constraint evaluation errors
-    connected_nodes = list(set([i for i, j in edges] + [j for i, j in edges]))
-    
-    demand = {}
-    for _ in range(len(connected_nodes) * 2): 
-        n = random.choice(connected_nodes)
-        c = random.choice(commodities)
-        demand[(n, c)] = random.randint(-50, 50)
-        
-    raw_data = {
-        'Nodes': connected_nodes,
-        'Commodities': commodities,
-        'Edges': edges,
-        'Capacity': capacity,
-        'Demand': demand
+from translator import translate
+import examples.example_3_multiflow as ex3
+
+# ---------------------------------------------------------------------------
+# Scale parameters — adjust to get Pyomo build time ~60 s on your machine.
+# Constraints ≈ N_NODES × N_COMMODITIES  +  N_EDGES
+# Variables   ≈ N_EDGES × N_COMMODITIES
+# ---------------------------------------------------------------------------
+N_NODES       = 7_000
+N_EDGES       = 56_000   # ≈ 8 × N_NODES  (avg degree 16)
+N_COMMODITIES = 50
+SEED          = 42
+
+
+# ---------------------------------------------------------------------------
+# Data generation
+# ---------------------------------------------------------------------------
+
+def generate_data(n_nodes, n_edges, n_commodities, seed):
+    rng = random.Random(seed)
+    nodes       = [f"N{i:05d}" for i in range(n_nodes)]
+    commodities = [f"K{k}"    for k  in range(n_commodities)]
+
+    # Sample unique directed edges without the slow while-loop rejection method:
+    # enumerate all possible (i, j) pairs and sample from them.
+    all_pairs = [(i, j) for i in range(n_nodes) for j in range(i + 1, n_nodes)]
+    # Directed edges: treat each undirected pair as two directed edges, then sample
+    # half of n_edges undirected pairs → n_edges directed edges.
+    if n_edges > 2 * len(all_pairs):
+        raise ValueError("n_edges exceeds the number of possible directed edges")
+    sampled = rng.sample(all_pairs, n_edges // 2)
+    edges = [(nodes[i], nodes[j]) for i, j in sampled] + \
+            [(nodes[j], nodes[i]) for i, j in sampled]
+
+    capacity = {e: rng.randint(100, 1_000) for e in edges}
+
+    # Keep only nodes that appear in at least one edge.
+    # Isolated nodes would cause Pyomo to see `0 == 0` (trivial True) and crash.
+    nodes = sorted({n for e in edges for n in e})
+
+    # Sparse supply/demand: only ~5 % of (node, commodity) pairs are non-zero.
+    # preprocess_data fills missing pairs with 0.
+    demand: dict = {}
+    n_sources = max(1, len(nodes) // 20)
+    for k in commodities:
+        sources = rng.sample(nodes, n_sources)
+        sinks   = rng.sample(nodes, n_sources)
+        total_supply = 0
+        for n in sources:
+            amt = rng.randint(10, 100)
+            demand[(n, k)] = amt
+            total_supply  += amt
+        per_sink = total_supply // n_sources
+        for n in sinks:
+            demand[(n, k)] = -per_sink   # balanced enough for feasibility
+
+    raw = {
+        "Nodes":       nodes,
+        "Commodities": commodities,
+        "Edges":       edges,
+        "Capacity":    capacity,
+        "Demand":      demand,
     }
-    
-    return example_3_multiflow.preprocess_data(raw_data)
+    return ex3.preprocess_data(raw)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def section(title):
+    print(f"\n{'─' * 58}")
+    print(f"  {title}")
+    print(f"{'─' * 58}")
+
+
+def model_stats(gurobi_m, label):
+    gurobi_m.update()
+    print(f"  {label:30s}  vars={gurobi_m.NumVars:>9,}  "
+          f"constrs={gurobi_m.NumConstrs:>9,}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Crank these numbers up further if you want to test the absolute memory limits
-    huge_data = generate_massive_data(10**6, 2*10**6, 10)
-    
-    # 0. Eat the Gurobi license check overhead
-    print("\n[Initializing Gurobi License...]")
-    _ = gp.Model() 
-    
-    print("\n--- 1. Testing Pyomo (AST Build + Matrix Compilation) ---")
-    t0 = time.time()
-    pyomo_model = example_3_multiflow.build_pyomo_model(huge_data)
-    
-    # Force Pyomo to build the C-backend matrix
-    opt = SolverFactory('gurobi_persistent')
-    opt.set_instance(pyomo_model) 
-    
-    t1 = time.time()
-    pyomo_time = t1 - t0
-    print(f"Pyomo True Build Time: {pyomo_time:.2f} seconds")
-    
-    print("\n--- 2. Testing Gurobipy-Pandas (Vectorized C-API) ---")
-    t0 = time.time()
-    gppd_model = example_3_multiflow.build_vectorized_model(huge_data)
-    t1 = time.time()
-    gppd_time = t1 - t0
-    print(f"Pandas True Build Time: {gppd_time:.2f} seconds")
-    
-    print(f"\nSpeedup: {pyomo_time / gppd_time:.1f}x faster")
+
+    # --- 0. Translate once (offline, not timed in the benchmark) -----------
+    section("Translation  (one-time offline cost)")
+    t0 = time.perf_counter()
+    translated_src = translate(ex3.build_pyomo_model)
+    _ns: dict = {}
+    exec(compile(translated_src, "<translated>", "exec"), _ns)
+    build_vectorized_model = _ns["build_vectorized_model"]
+    translation_ms = (time.perf_counter() - t0) * 1_000
+    print(f"  translate() completed in {translation_ms:.1f} ms")
+
+    # --- 1. Generate data --------------------------------------------------
+    section("Data generation")
+    print(f"  N_NODES={N_NODES:,}  N_EDGES={N_EDGES:,}  N_COMMODITIES={N_COMMODITIES}")
+    t0 = time.perf_counter()
+    data = generate_data(N_NODES, N_EDGES, N_COMMODITIES, SEED)
+    data_ms = (time.perf_counter() - t0) * 1_000
+    n_vars    = len(data["Edges"]) * N_COMMODITIES
+    n_constrs = len(data["Nodes"]) * N_COMMODITIES + len(data["Edges"])
+    print(f"  Data ready in {data_ms:.0f} ms")
+    print(f"  Expected model size: {n_vars:,} variables, ~{n_constrs:,} constraints")
+
+    # --- 2. Warm up Gurobi (eat license-check overhead) --------------------
+    section("Warming up Gurobi")
+    _ = gp.Model()
+    print("  Done.")
+
+    # --- 3. Pyomo build ----------------------------------------------------
+    section("PYOMO  —  Python-loop rule evaluation + Gurobi compilation")
+    t0 = time.perf_counter()
+
+    pyomo_model = ex3.build_pyomo_model(data)
+
+    t_rule = time.perf_counter()
+    opt = SolverFactory("gurobi_persistent")
+    opt.set_instance(pyomo_model)
+    t1 = time.perf_counter()
+
+    pyomo_rule_s    = t_rule - t0
+    pyomo_compile_s = t1 - t_rule
+    pyomo_total_s   = t1 - t0
+
+    gurobi_from_pyomo = opt._solver_model
+    model_stats(gurobi_from_pyomo, "Pyomo model")
+    print(f"  Rule evaluation:     {pyomo_rule_s:6.2f} s")
+    print(f"  Gurobi compilation:  {pyomo_compile_s:6.2f} s")
+    print(f"  Total build time:    {pyomo_total_s:6.2f} s")
+
+    # --- 4. gurobipy-pandas build -----------------------------------------
+    section("PANDAS  —  gurobipy-pandas vectorized build")
+    t0 = time.perf_counter()
+    gppd_model = build_vectorized_model(data)
+    gppd_model.update()
+    t1 = time.perf_counter()
+    gppd_total_s = t1 - t0
+
+    model_stats(gppd_model, "Translated model")
+    print(f"  Total build time:    {gppd_total_s:6.2f} s")
+
+    # --- 5. Results --------------------------------------------------------
+    section("RESULTS")
+    speedup = pyomo_total_s / gppd_total_s
+    match = (gurobi_from_pyomo.NumVars    == gppd_model.NumVars and
+             gurobi_from_pyomo.NumConstrs == gppd_model.NumConstrs)
+    print(f"  Pyomo  build time:  {pyomo_total_s:6.2f} s")
+    print(f"  Pandas build time:  {gppd_total_s:6.2f} s")
+    print(f"  Speedup:            {speedup:6.1f}×")
+    print(f"  Models identical:   {'YES ✓' if match else 'NO ✗  — check constraint counts above'}")
+    print()
+    if not match:
+        sys.exit(1)
