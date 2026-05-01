@@ -251,18 +251,21 @@ code. Choose short, meaningful names (`i`, `t`, `node`) — they appear in every
 ## Solve and populate API
 
 ```python
-from translator import solve, populate_pyomo
+from translator import solve, solution_proxy
 
 # Translate + build + optimize in one call
 gp_model, values = solve(build_pyomo_model, data)
 # gp_model — solved gp.Model; check gp_model.ObjVal, gp_model.SolCount, etc.
 # values   — {var_name: pd.Series(index → float)}, empty if infeasible
 
-# Load solution back into a Pyomo model
-pyo_model = build_pyomo_model(data)
-populate_pyomo(pyo_model, values)
-# pyo_model.x[i, j].value now holds the optimal value
+# Access solution values — zero-cost, no Pyomo constraints built
+sol = solution_proxy(values)
+sol.x['i1', 'j1'].value   # identical interface to pyo_model.x['i1', 'j1'].value
 ```
+
+`solution_proxy` wraps the `values` dict in a thin mock that duck-types Pyomo's
+`.value` attribute.  It costs nothing to construct — no Pyomo model is built,
+no constraint matrices are generated.
 
 ---
 

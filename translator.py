@@ -2,8 +2,10 @@
 Pyomo → gurobipy-pandas translator.
 
 Public API:
-    from translator import translate
+    from translator import translate, solve, solution_proxy
     code_str = translate(build_pyomo_model)
+    gp_model, values = solve(build_pyomo_model, data)
+    sol = solution_proxy(values)   # sol.x[i, j].value
 """
 from __future__ import annotations
 
@@ -580,12 +582,6 @@ class _RuleClassifier:
         obj.lhs_terms = [t for t, _s in signed]
         obj.signs = [s for _t, s in signed]
 
-    def _collect_all_sum_terms(self, node: ast.expr) -> list:
-        """Recursively collect one SumTermInfo per sum() call in a BinOp(Add) tree."""
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            return self._collect_all_sum_terms(node.left) + self._collect_all_sum_terms(node.right)
-        return self._parse_first_generator(node)
-
     def _collect_signed_sum_terms(self, node: ast.expr) -> list:
         """Collect (SumTermInfo, sign) pairs from a tree of Add/Sub sum() calls.
         sign is +1 for additive terms and -1 for subtracted terms."""
@@ -663,6 +659,8 @@ class _RuleClassifier:
 
         intra_terms: list = []
 
+        scalar_coeff_val = 1.0   # overridden in the Mult branch when a literal is present
+
         if isinstance(elt, ast.Subscript):
             vn = _node_is_m_attr(elt.value)
             if vn and vn in self.t.vars:
@@ -672,7 +670,6 @@ class _RuleClassifier:
                 param_name = vn
         elif isinstance(elt, ast.BinOp) and isinstance(elt.op, ast.Mult):
             # param * var  or  var * param  or  constant * var
-            scalar_coeff_val = 1.0
             for side in [elt.left, elt.right]:
                 if isinstance(side, ast.Constant) and isinstance(side.value, (int, float)):
                     scalar_coeff_val = float(side.value)
@@ -696,8 +693,7 @@ class _RuleClassifier:
         if var_name is None:
             return None
 
-        # scalar_coeff_val is set in the Mult branch above; default 1.0 otherwise
-        coeff = locals().get('scalar_coeff_val', 1.0)
+        coeff = scalar_coeff_val
         return SumTermInfo(
             var_name=var_name,
             param_name=param_name,
@@ -1627,7 +1623,6 @@ class _CodeGen:
     def _gen_P6(self, ci: ConstrInfo):
         """Direct var access, with optional subset filter."""
         var_name = ci.lhs_direct_var
-        vi = self.t.vars.get(var_name, list(self.t.vars.values())[0])
         df_var = f'df_{var_name}'
 
         # Check for subset set
@@ -1667,11 +1662,8 @@ class _CodeGen:
         # Constant
         if isinstance(rhs, ast.Constant):
             return repr(rhs.value)
-        # Fallback: unparse
-        try:
-            return ast.unparse(rhs)
-        except Exception:
-            return '???'
+        # Fallback: unparse the AST node as-is (requires Python 3.9+)
+        return ast.unparse(rhs)
 
     def _rhs_param(self, ci: ConstrInfo) -> Optional[ParamInfo]:
         rhs = ci.rhs_node
@@ -1757,25 +1749,72 @@ def solve(func, data, silent: bool = True):
     if model.SolCount == 0:
         return model, {}
 
-    values = {}
-    for name, series in var_series.items():
-        try:
-            values[name] = series.apply(lambda v: v.X)
-        except Exception:
-            pass
+    values = {name: series.apply(lambda v: v.X) for name, series in var_series.items()}
     return model, values
 
 
-def populate_pyomo(pyomo_model, values: dict) -> None:
-    """
-    Load gurobipy solution values (from solve()) into a Pyomo model's variables.
+# ---------------------------------------------------------------------------
+# Solution proxy — zero-cost alternative to populate_pyomo
+# ---------------------------------------------------------------------------
 
-    After calling this, pyomo_model.x[idx].value holds the optimal value for
-    every index in the series, enabling Pyomo-level sensitivity analysis,
-    objective evaluation, or result reporting without re-solving via Pyomo.
+class _VarData:
+    """Single variable element: exposes .value like Pyomo's VarData."""
+    __slots__ = ('value',)
+
+    def __init__(self, v: float):
+        self.value = v
+
+
+class _VarProxy:
+    """Mimics a Pyomo Var component: proxy.x[i, j].value works as expected."""
+
+    def __init__(self, series):
+        self._d = {idx: _VarData(val) for idx, val in series.items()}
+
+    def __getitem__(self, key):
+        return self._d[key]
+
+
+class SolutionProxy:
+    """Duck-type substitute for a populated Pyomo ConcreteModel.
+
+    Created by solution_proxy(values); supports model.var_name[idx].value
+    without building a single Pyomo constraint.
+    """
+
+    def __init__(self, values: dict):
+        for name, series in values.items():
+            setattr(self, name, _VarProxy(series))
+
+
+def solution_proxy(values: dict) -> SolutionProxy:
+    """Wrap solve() values in a zero-cost proxy that mimics Pyomo's .value syntax.
 
     Args:
-        pyomo_model: A Pyomo ConcreteModel (already built, not yet solved).
+        values: Dict returned by solve(): {var_name: pd.Series(index → float)}.
+
+    Returns:
+        A SolutionProxy whose attributes are per-variable proxies.
+        Access: sol.x['i1', 'j1'].value  (same as pyo_model.x['i1', 'j1'].value)
+
+    Example::
+
+        gp_model, values = solve(build_pyomo_model, data)
+        sol = solution_proxy(values)
+        print(sol.x['i1', 'j1'].value)
+    """
+    return SolutionProxy(values)
+
+
+def populate_pyomo(pyomo_model, values: dict) -> None:
+    """Load solve() values into a Pyomo model's variables.
+
+    Note: building a full Pyomo model just to call this is usually unnecessary.
+    Prefer solution_proxy(values) instead — it gives the same .value interface
+    at zero cost.
+
+    Args:
+        pyomo_model: A Pyomo ConcreteModel (already built).
         values:      Dict returned by solve(): {var_name: pd.Series(index → float)}.
     """
     for var_name, series in values.items():
