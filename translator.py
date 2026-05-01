@@ -52,6 +52,9 @@ class SumTermInfo:
     iter_is_indexed: bool
     iter_index_arg: Optional[str]  # subscript arg when indexed
     var_subscript_args: list = field(default_factory=list)  # args in m.var[a, b, c]
+    # Intra-sum linear combination: all (var_name, param_name, subscript_args, sign) terms
+    # sign is +1 or -1; populated when elt is any linear combination of vars
+    intra_terms: list = field(default_factory=list)
 
 
 @dataclass
@@ -148,6 +151,26 @@ def _gurobi_sense(op: str) -> str:
 
 def _py_op_str(op: str) -> str:
     return {'LEQ': '<=', 'GEQ': '>=', 'EQ': '=='}[op]
+
+
+def _collect_add_terms(node: ast.expr) -> list:
+    """Recursively unwrap a left-associative BinOp(Add) tree into a flat list of leaf nodes."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _collect_add_terms(node.left) + _collect_add_terms(node.right)
+    return [node]
+
+
+def _collect_signed_terms(node: ast.expr, sign: int = 1) -> list:
+    """Recursively collect (leaf_node, sign) pairs from a tree of Add/Sub BinOps.
+    Handles arbitrary nesting: a + b - (c + d) → [(a,+1),(b,+1),(c,-1),(d,-1)]."""
+    if isinstance(node, ast.BinOp):
+        if isinstance(node.op, ast.Add):
+            return (_collect_signed_terms(node.left, sign) +
+                    _collect_signed_terms(node.right, sign))
+        if isinstance(node.op, ast.Sub):
+            return (_collect_signed_terms(node.left, sign) +
+                    _collect_signed_terms(node.right, -sign))
+    return [(node, sign)]
 
 
 # ---------------------------------------------------------------------------
@@ -325,11 +348,14 @@ class _Translator:
             if attr and 'maximize' in attr.lower():
                 sense = 'MAXIMIZE'
 
-        rule_kw = _extract_keyword(call, 'rule')
-        rule_name = rule_kw.id if isinstance(rule_kw, ast.Name) else ''
-
         self.obj = ObjInfo(pyomo_name=name, sense=sense)
-        self.obj._rule_name = rule_name
+
+        rule_kw = _extract_keyword(call, 'rule')
+        expr_kw  = _extract_keyword(call, 'expr')
+        if rule_kw is not None:
+            self.obj._rule_name = rule_kw.id if isinstance(rule_kw, ast.Name) else ''
+        elif expr_kw is not None:
+            self.obj._inline_expr = expr_kw
 
     # ------------------------------------------------------------------
     def classify(self):
@@ -339,10 +365,13 @@ class _Translator:
                 classifier.classify_inline(ci)
             elif ci.rule_name and ci.rule_name in self._rules:
                 classifier.classify_constr(ci, self._rules[ci.rule_name])
-        if self.obj and hasattr(self.obj, '_rule_name'):
-            rn = self.obj._rule_name
-            if rn and rn in self._rules:
-                classifier.classify_obj(self.obj, self._rules[rn])
+        if self.obj:
+            if hasattr(self.obj, '_rule_name'):
+                rn = self.obj._rule_name
+                if rn and rn in self._rules:
+                    classifier.classify_obj(self.obj, self._rules[rn])
+            elif hasattr(self.obj, '_inline_expr'):
+                classifier.classify_obj_inline(self.obj, self.obj._inline_expr)
 
     # ------------------------------------------------------------------
     def generate(self) -> str:
@@ -416,6 +445,16 @@ class _RuleClassifier:
                 ci.lhs_terms = [left_term, right_term]
                 return
 
+        # P_inter_add: BinOp(Add) of multiple independent sum() calls
+        # e.g.  sum(x[p,s] for s in S) + sum(y[p,e] for e in E) <= Cap[p]
+        if isinstance(lhs_node, ast.BinOp) and isinstance(lhs_node.op, ast.Add):
+            add_nodes = _collect_add_terms(lhs_node)
+            parsed = [self._parse_sum_call(n) for n in add_nodes]
+            if all(t is not None for t in parsed):
+                ci.pattern = 'P_inter_add'
+                ci.lhs_terms = parsed
+                return
+
         # P4b / P6: LHS is m.var[...] (direct var access)
         lhs_m_var = self._extract_direct_var(lhs_node)
         if lhs_m_var is not None:
@@ -432,16 +471,17 @@ class _RuleClassifier:
             ci.lhs_direct_var = lhs_m_var
             return
 
-        # P1/P2/P4/P5: LHS is a sum() call
+        # P1/P2/P4/P5/P_intra_add: LHS is a sum() call
         lhs_sum = self._parse_sum_call(lhs_node)
         if lhs_sum is not None:
             ci.lhs_terms.append(lhs_sum)
-            if lhs_sum.iter_is_indexed:
+            if lhs_sum.intra_terms:
+                # Intra-sum: sum(c1*x + c2*y - z for ...)
+                ci.pattern = 'P_intra_add'
+            elif lhs_sum.iter_is_indexed:
                 if lhs_sum.param_name:
-                    # Indexed set + param*var → cross-dim merge (P4)
                     ci.pattern = 'P4'
                 else:
-                    # Indexed set + pure var → rolling window / graph adjacency (P5)
                     ci.pattern = 'P5'
             elif not ci.rule_args:
                 ci.pattern = 'P2'
@@ -465,10 +505,34 @@ class _RuleClassifier:
         lhs_node = expr_node.left
         ci.rhs_node = expr_node.comparators[0]
 
+        if isinstance(lhs_node, ast.BinOp) and isinstance(lhs_node.op, ast.Add):
+            add_nodes = _collect_add_terms(lhs_node)
+            parsed = [self._parse_sum_call(n) for n in add_nodes]
+            if all(t is not None for t in parsed):
+                ci.pattern = 'P_inter_add'
+                ci.lhs_terms = parsed
+                return
+
+        # P4b/P6: direct var on LHS
+        lhs_m_var = self._extract_direct_var(lhs_node)
+        if lhs_m_var is not None:
+            rhs_sum = self._parse_sum_call(ci.rhs_node)
+            if rhs_sum is not None:
+                ci.pattern = 'P4'
+                ci.lhs_is_direct_var = True
+                ci.lhs_direct_var = lhs_m_var
+                ci.rhs_terms = [rhs_sum]
+                return
+            ci.pattern = 'P6'
+            ci.lhs_direct_var = lhs_m_var
+            return
+
         lhs_sum = self._parse_sum_call(lhs_node)
         if lhs_sum is not None:
             ci.lhs_terms.append(lhs_sum)
-            if lhs_sum.iter_is_indexed:
+            if lhs_sum.intra_terms:
+                ci.pattern = 'P_intra_add'
+            elif lhs_sum.iter_is_indexed:
                 ci.pattern = 'P4' if lhs_sum.param_name else 'P5'
             elif not ci.rule_args:
                 ci.pattern = 'P2'
@@ -484,27 +548,31 @@ class _RuleClassifier:
                 return_node = stmt.value
         if return_node is None:
             return
-        term = self._parse_sum_call(return_node)
-        if term:
-            obj.lhs_terms.append(term)
-            # Handle nested generators: one SumTermInfo per generator
-            # Re-parse to get all generators
-            obj.lhs_terms = self._parse_all_generators(return_node)
+        obj.lhs_terms = self._collect_all_sum_terms(return_node)
 
-    def _parse_all_generators(self, node: ast.expr) -> list:
-        """Parse a sum() with potentially multiple for-clauses."""
+    def classify_obj_inline(self, obj: ObjInfo, expr_node: ast.expr):
+        """Handle pyo.Objective(expr=...) — expression may be sum_A + sum_B."""
+        obj.lhs_terms = self._collect_all_sum_terms(expr_node)
+
+    def _collect_all_sum_terms(self, node: ast.expr) -> list:
+        """Recursively collect one SumTermInfo per sum() call in a BinOp(Add) tree."""
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return self._collect_all_sum_terms(node.left) + self._collect_all_sum_terms(node.right)
+        return self._parse_first_generator(node)
+
+    def _parse_first_generator(self, node: ast.expr) -> list:
+        """Return a list with the first parseable SumTermInfo from a sum() call."""
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == 'sum'):
             return []
         if not node.args or not isinstance(node.args[0], ast.GeneratorExp):
             return []
         gen_exp = node.args[0]
-        terms = []
         for comp in gen_exp.generators:
             term = self._parse_comprehension(gen_exp.elt, comp)
-            if term:
-                terms.append(term)
-        return terms
+            if term is not None:
+                return [term]
+        return []
 
     def _parse_sum_call(self, node: ast.expr) -> Optional[SumTermInfo]:
         """Parse a single sum(expr for x in Set) call."""
@@ -558,6 +626,8 @@ class _RuleClassifier:
         param_name = None
         var_subscript_args = []
 
+        intra_terms: list = []
+
         if isinstance(elt, ast.Subscript):
             vn = _node_is_m_attr(elt.value)
             if vn and vn in self.t.vars:
@@ -578,6 +648,11 @@ class _RuleClassifier:
                     var_subscript_args = _extract_subscript_args(side)
                 elif attr in self.t.params:
                     param_name = attr
+        elif isinstance(elt, ast.BinOp) and isinstance(elt.op, (ast.Add, ast.Sub)):
+            # General intra-sum linear combination: x + y - z, a*x + b*y, etc.
+            intra_terms = self._parse_linear_comb(elt)
+            if intra_terms:
+                var_name, param_name, var_subscript_args, _ = intra_terms[0]
 
         if var_name is None:
             return None
@@ -590,6 +665,7 @@ class _RuleClassifier:
             iter_is_indexed=iter_is_indexed,
             iter_index_arg=iter_index_arg,
             var_subscript_args=var_subscript_args,
+            intra_terms=intra_terms,
         )
 
     def _extract_direct_var(self, node: ast.expr) -> Optional[str]:
@@ -599,6 +675,33 @@ class _RuleClassifier:
             if m_attr and m_attr in self.t.vars:
                 return m_attr
         return None
+
+    def _parse_linear_comb(self, elt: ast.expr) -> list:
+        """Parse a linear combination expression into a list of
+        (var_name, param_name, subscript_args, sign) tuples.
+        Handles arbitrary +/- nesting and param*var or var*param weighting."""
+        result = []
+        for node, sign in _collect_signed_terms(elt):
+            if isinstance(node, ast.Subscript):
+                attr = _node_is_m_attr(node.value)
+                if attr and attr in self.t.vars:
+                    result.append((attr, None, _extract_subscript_args(node), sign))
+            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+                vname, pname, sargs = None, None, []
+                for side in [node.left, node.right]:
+                    if not isinstance(side, ast.Subscript):
+                        continue
+                    attr = _node_is_m_attr(side.value)
+                    if attr is None:
+                        continue
+                    if attr in self.t.vars:
+                        vname = attr
+                        sargs = _extract_subscript_args(side)
+                    elif attr in self.t.params:
+                        pname = attr
+                if vname:
+                    result.append((vname, pname, sargs, sign))
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -656,14 +759,19 @@ class _IndexRegistry:
         for ci in self.t.constrs:
             rule_args_set = set(ci.rule_args)
             for term in ci.lhs_terms + ci.rhs_terms:
-                if not term.var_subscript_args:
-                    continue
-                vname = term.var_name
-                if vname not in pos_names:
-                    pos_names[vname] = {}
-                for pos, arg in enumerate(term.var_subscript_args):
-                    if arg not in rule_args_set and pos not in pos_names[vname]:
-                        pos_names[vname][pos] = arg
+                # Register from the main term's subscript args
+                if term.var_subscript_args:
+                    vname = term.var_name
+                    pos_names.setdefault(vname, {})
+                    for pos, arg in enumerate(term.var_subscript_args):
+                        if arg not in rule_args_set and pos not in pos_names[vname]:
+                            pos_names[vname][pos] = arg
+                # Register from intra_terms (general linear combination)
+                for (ivname, _ipname, isargs, _sign) in term.intra_terms:
+                    pos_names.setdefault(ivname, {})
+                    for pos, arg in enumerate(isargs):
+                        if arg not in rule_args_set and pos not in pos_names[ivname]:
+                            pos_names[ivname][pos] = arg
 
         # Register set dimensions using the accumulated position names
         for vi in self.t.vars.values():
@@ -712,7 +820,12 @@ class _CodeGen:
         prefix = '    ' * indent
         self.lines.append(prefix + line if line else '')
 
-    def generate(self) -> str:
+    def generate(self, extended: bool = False) -> str:
+        """Generate build_vectorized_model source.
+
+        When extended=True the generated function returns (model, {var_name: series})
+        instead of just model, so callers can extract solved variable values.
+        """
         self.lines = []
         self._emit('def build_vectorized_model(data):', indent=0)
         self._emit('import gurobipy as gp')
@@ -730,7 +843,15 @@ class _CodeGen:
         for ci in self.t.constrs:
             self._gen_constraint(ci)
 
-        self._emit('return m')
+        if extended:
+            vars_repr = (
+                '{' +
+                ', '.join(f"'{vn}': df_{vn}['{vn}']" for vn in self.t._var_order) +
+                '}'
+            )
+            self._emit(f'return m, {vars_repr}')
+        else:
+            self._emit('return m')
         return '\n'.join(self.lines)
 
     # ------------------------------------------------------------------
@@ -831,33 +952,24 @@ class _CodeGen:
         obj = self.t.obj
         if not obj.lhs_terms:
             return
-        # Expect: sum(CompCost[c] * buy_comp[c, t] for c in C for t in T)
-        # Pattern: param (1D over c) × var (2D over c, t)
-        # Strategy: join param onto var df on the shared dimension, multiply, sum
-        term = obj.lhs_terms[0]  # use first term for the main var
-        vi = self.t.vars.get(term.var_name)
-        pi = self.t.params.get(term.param_name) if term.param_name else None
-
-        df_var = f'df_{term.var_name}'
-        all_names = self.r.all_names_for_var(vi) if vi else []
-
-        if pi and pi.index_sets:
-            # join on shared dims
-            shared_dims = self.r.names_for(pi.index_sets[0])
-            on_dim = shared_dims[0]
-            param_col = pi.pyomo_name.lower()
-            self._emit(f"# Objective")
-            self._emit(f"df_{term.var_name}_obj = {df_var}.join(s_{pi.pyomo_name.lower()}, on='{on_dim}')")
-            self._emit(
-                f"obj_expr = (df_{term.var_name}_obj['{param_col}'] * "
-                f"df_{term.var_name}_obj['{term.var_name}']).sum()"
-            )
-        else:
-            self._emit(f"# Objective")
-            self._emit(f"obj_expr = {df_var}['{term.var_name}'].sum()")
-
+        self._emit('# Objective')
+        part_vars = []
+        for i, term in enumerate(obj.lhs_terms):
+            pi = self.t.params.get(term.param_name) if term.param_name else None
+            df_var = f'df_{term.var_name}'
+            part = f'_obj_t{i}'
+            if pi and pi.index_sets:
+                on_dim = self.r.names_for(pi.index_sets[0])[0]
+                param_col = pi.pyomo_name.lower()
+                joined = f'df_{term.var_name}_obj_{i}'
+                self._emit(f"{joined} = {df_var}.join(s_{pi.pyomo_name.lower()}, on='{on_dim}')")
+                self._emit(f"{part} = ({joined}['{param_col}'] * {joined}['{term.var_name}']).sum()")
+            else:
+                self._emit(f"{part} = {df_var}['{term.var_name}'].sum()")
+            part_vars.append(part)
+        obj_expr = ' + '.join(part_vars)
         sense_str = f"gp.GRB.{'MINIMIZE' if obj.sense == 'MINIMIZE' else 'MAXIMIZE'}"
-        self._emit(f"m.setObjective(obj_expr, {sense_str})")
+        self._emit(f"m.setObjective({obj_expr}, {sense_str})")
         self._emit()
 
     # ------------------------------------------------------------------
@@ -875,6 +987,10 @@ class _CodeGen:
             self._gen_P5(ci)
         elif ci.pattern == 'P6':
             self._gen_P6(ci)
+        elif ci.pattern == 'P_inter_add':
+            self._gen_P_inter_add(ci)
+        elif ci.pattern == 'P_intra_add':
+            self._gen_P_intra_add(ci)
         else:
             self._emit(f"# WARNING: unknown pattern for {ci.pyomo_name}")
         self._emit()
@@ -1168,12 +1284,18 @@ class _CodeGen:
         else:
             self._emit(f"{reset_df} = {df_var}['{term.var_name}'].reset_index()")
 
-        # --- 5. Merge on inner column names ---
+        # --- 5. Merge on inner column names (plus any outer-index columns that
+        # also appear in the variable's reset_index, to avoid pandas duplicate-column
+        # suffixes when the variable subscript contains the constraint's outer index,
+        # e.g. x[i, j] iterated over SubSet[i]). ---
         lagged_df = f'df_lagged_{suffix}'
-        if len(inner_col_names) == 1:
-            on_repr = f"'{inner_col_names[0]}'"
+        all_var_names_post_rename = [rename_map.get(n, n) for n in var_index_names]
+        extra_on = [n for n in map_outer_names if n in all_var_names_post_rename]
+        merge_on = inner_col_names + extra_on
+        if len(merge_on) == 1:
+            on_repr = f"'{merge_on[0]}'"
         else:
-            on_repr = '[' + ', '.join(f"'{c}'" for c in inner_col_names) + ']'
+            on_repr = '[' + ', '.join(f"'{c}'" for c in merge_on) + ']'
         self._emit(f"{lagged_df} = pd.merge({map_df}, {reset_df}, on={on_repr})")
 
         # --- 6. Groupby full outer names, sum ---
@@ -1212,6 +1334,114 @@ class _CodeGen:
                 names.extend(self.r.names_for(s))
             names_repr = str(names)
             self._emit(f"{idx_var} = pd.MultiIndex.from_product({sets_repr}, names={names_repr})")
+
+    # ------------------------------------------------------------------
+    def _gen_P_inter_add(self, ci: ConstrInfo):
+        """sum(x[...]) + sum(y[...]) — combine separate groupby results with .add()."""
+        groupby_keys = []
+        for s in ci.index_sets:
+            groupby_keys.extend(self.r.names_for(s))
+        keys_repr = '[' + ', '.join(f"'{k}'" for k in groupby_keys) + ']'
+
+        term_var_names = []
+        for idx, term in enumerate(ci.lhs_terms):
+            df_v = f'df_{term.var_name}'
+            lhs_i = f'lhs_{ci.pyomo_name}_t{idx}'
+            if term.param_name:
+                pi = self.t.params[term.param_name]
+                on_dim = self.r.names_for(pi.index_sets[0])[0] if pi.index_sets else None
+                joined = f'_df_{ci.pyomo_name}_w{idx}'
+                self._emit(f"{joined} = {df_v}.join(s_{pi.pyomo_name.lower()}, on='{on_dim}')")
+                self._emit(
+                    f"{lhs_i} = ({joined}['{pi.pyomo_name.lower()}'] * {joined}['{term.var_name}']).groupby({keys_repr}).sum()"
+                )
+            else:
+                self._emit(f"{lhs_i} = {df_v}.groupby({keys_repr})['{term.var_name}'].sum()")
+            term_var_names.append(lhs_i)
+
+        lhs_var = f'lhs_{ci.pyomo_name}'
+        # Chain .add(fill_value=0) across all terms
+        result = term_var_names[0]
+        for tv in term_var_names[1:]:
+            self._emit(f"{lhs_var} = {result}.add({tv}, fill_value=0)")
+            result = lhs_var
+        if len(term_var_names) == 1:
+            self._emit(f"{lhs_var} = {term_var_names[0]}")
+
+        rhs_repr = self._rhs_repr(ci)
+        sense = _gurobi_sense(ci.op)
+        self._emit(f"gppd.add_constrs(m, {lhs_var}, {sense}, {rhs_repr}, name='{ci.pyomo_name}')")
+
+    # ------------------------------------------------------------------
+    def _gen_P_intra_add(self, ci: ConstrInfo):
+        """General intra-sum linear combination: sum(c1*x + c2*y - z for ...) op rhs.
+        Works for any number of variables with any compatible index shapes by
+        flattening each term then iteratively merging on shared index columns."""
+        term = ci.lhs_terms[0]
+        intra = term.intra_terms   # [(var_name, param_name, subscript_args, sign), ...]
+        suffix = ci.pyomo_name
+
+        outer_names = []
+        for s in ci.index_sets:
+            outer_names.extend(self.r.names_for(s))
+        keys_repr = (f"'{outer_names[0]}'" if len(outer_names) == 1
+                     else '[' + ', '.join(f"'{k}'" for k in outer_names) + ']')
+
+        # --- Step 1: flatten each variable (+ its param coefficient if present) ---
+        flat_infos = []
+        for i, (vname, pname, _sargs, sign) in enumerate(intra):
+            flat = f'_fi{i}_{suffix}'
+            vi = self.t.vars[vname]
+            idx_cols = set(self.r.all_names_for_var(vi))
+            self._emit(f"{flat} = df_{vname}['{vname}'].reset_index()")
+            if pname:
+                pi = self.t.params[pname]
+                param_idx_cols = []
+                for s in pi.index_sets:
+                    param_idx_cols.extend(self.r.names_for(s))
+                on_repr = (f"'{param_idx_cols[0]}'" if len(param_idx_cols) == 1
+                           else '[' + ', '.join(f"'{c}'" for c in param_idx_cols) + ']')
+                self._emit(f"{flat} = pd.merge({flat}, s_{pi.pyomo_name.lower()}.reset_index(), on={on_repr})")
+                idx_cols |= set(param_idx_cols)
+            flat_infos.append({'df': flat, 'var': vname, 'param': pname,
+                               'idx': idx_cols, 'sign': sign})
+
+        # --- Step 2: iteratively merge all flat DataFrames on shared index columns ---
+        merged = f'_mi_{suffix}'
+        self._emit(f"{merged} = {flat_infos[0]['df']}")
+        accumulated = flat_infos[0]['idx'].copy()
+        for info in flat_infos[1:]:
+            common = sorted(accumulated & info['idx'])
+            on_repr = (f"'{common[0]}'" if len(common) == 1
+                       else '[' + ', '.join(f"'{c}'" for c in common) + ']')
+            self._emit(f"{merged} = pd.merge({merged}, {info['df']}, on={on_repr})")
+            accumulated |= info['idx']
+
+        # --- Step 3: build the linear combination expression string ---
+        expr_str = ''
+        for i, info in enumerate(flat_infos):
+            vname, pname, sign = info['var'], info['param'], info['sign']
+            if pname:
+                pi = self.t.params[pname]
+                term_str = f"{merged}['{pi.pyomo_name.lower()}'] * {merged}['{vname}']"
+            else:
+                term_str = f"{merged}['{vname}']"
+            if i == 0:
+                expr_str = f"-{term_str}" if sign < 0 else term_str
+            else:
+                expr_str += f" - {term_str}" if sign < 0 else f" + {term_str}"
+
+        # --- Step 4: groupby outer constraint index and sum ---
+        # After merge the table has a plain RangeIndex, so pass column references
+        # explicitly (not string names) to groupby.
+        lhs_var = f'lhs_{suffix}'
+        grp_parts = [f"{merged}['{k}']" for k in outer_names]
+        grp_repr = grp_parts[0] if len(grp_parts) == 1 else '[' + ', '.join(grp_parts) + ']'
+        self._emit(f"{lhs_var} = ({expr_str}).groupby({grp_repr}).sum()")
+
+        rhs_repr = self._rhs_repr(ci)
+        sense = _gurobi_sense(ci.op)
+        self._emit(f"gppd.add_constrs(m, {lhs_var}, {sense}, {rhs_repr}, name='{ci.pyomo_name}')")
 
     # ------------------------------------------------------------------
     def _gen_P6(self, ci: ConstrInfo):
@@ -1302,3 +1532,75 @@ def translate(func) -> str:
     translator.parse()
     translator.classify()
     return translator.generate()
+
+
+def solve(func, data, silent: bool = True):
+    """
+    Translate func, build and optimize the gurobipy-pandas model, and return
+    the solved variable values.
+
+    Args:
+        func:   A build_pyomo_model function following translator conventions.
+        data:   The data dict passed to the model builder.
+        silent: Suppress Gurobi output (default True).
+
+    Returns:
+        (model, values) where
+            model  – the solved gp.Model
+            values – dict {var_name: pd.Series(index → float)}
+                     Empty dict if the model was infeasible / no solution found.
+    """
+    import gurobipy as gp   # noqa: F401 — needed in exec'd namespace
+    import gurobipy_pandas as gppd  # noqa: F401
+    import pandas as pd     # noqa: F401
+
+    raw_src = inspect.getsource(func)
+    src = textwrap.dedent(raw_src)
+    tree = ast.parse(src)
+    func_def = tree.body[0]
+
+    t = _Translator(func_def)
+    t.parse()
+    t.classify()
+    registry = _IndexRegistry(t)
+    registry.build()
+    code = _CodeGen(t, registry).generate(extended=True)
+
+    ns = {}
+    exec(compile(code, '<translated-extended>', 'exec'), ns)
+    model, var_series = ns['build_vectorized_model'](data)
+
+    if silent:
+        model.setParam('OutputFlag', 0)
+    model.optimize()
+
+    if model.SolCount == 0:
+        return model, {}
+
+    values = {}
+    for name, series in var_series.items():
+        try:
+            values[name] = series.apply(lambda v: v.X)
+        except Exception:
+            pass
+    return model, values
+
+
+def populate_pyomo(pyomo_model, values: dict) -> None:
+    """
+    Load gurobipy solution values (from solve()) into a Pyomo model's variables.
+
+    After calling this, pyomo_model.x[idx].value holds the optimal value for
+    every index in the series, enabling Pyomo-level sensitivity analysis,
+    objective evaluation, or result reporting without re-solving via Pyomo.
+
+    Args:
+        pyomo_model: A Pyomo ConcreteModel (already built, not yet solved).
+        values:      Dict returned by solve(): {var_name: pd.Series(index → float)}.
+    """
+    for var_name, series in values.items():
+        pyo_var = getattr(pyomo_model, var_name, None)
+        if pyo_var is None:
+            continue
+        for idx, val in series.items():
+            pyo_var[idx].set_value(val)

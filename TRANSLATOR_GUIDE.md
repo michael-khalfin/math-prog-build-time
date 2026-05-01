@@ -2,147 +2,103 @@
 
 `translate(func)` converts a `build_pyomo_model` function into the source of an
 equivalent `build_vectorized_model` function that uses gurobipy-pandas.
-The translated model is built orders of magnitude faster for large instances
-because it replaces Python for-loops with vectorized pandas operations.
-
----
-
-## Quick start
 
 ```python
-from translator import translate
+from translator import translate, solve, populate_pyomo
 import examples.example_1_supply as ex1
 
-code = translate(ex1.build_pyomo_model)   # returns a Python source string
+# Option A — inspect generated code
+code = translate(ex1.build_pyomo_model)
 exec(compile(code, "<translated>", "exec"))
-model = build_vectorized_model(ex1.data)  # ready-to-solve gp.Model
+model = build_vectorized_model(ex1.data)
+
+# Option B — translate, solve, and get values back in one call
+gp_model, values = solve(ex1.build_pyomo_model, ex1.data)
+populate_pyomo(ex1.build_pyomo_model(ex1.data), values)
 ```
 
 ---
 
-## How to write a translatable model
+## Hard requirements
 
-### Hard requirements
-
-| Requirement | Why |
+| Requirement | Notes |
 |---|---|
-| The Pyomo model object must be named `m` | The parser looks for `m.X = pyo.Y(...)` |
-| Pyomo must be imported as `pyo` | The parser matches `pyo.Set`, `pyo.Var`, etc. |
-| Function must be named `build_pyomo_model` | Required for `test_translator.py` test harness; not required by `translate()` itself |
-| The function's single argument must be named `data` | The parser uses `data['key']` to locate data keys |
+| Model object named `m` | Parser matches `m.X = pyo.Y(...)` |
+| Pyomo imported as `pyo` | Parser matches `pyo.Set`, `pyo.Var`, etc. |
+| Single argument named `data` | Parser uses `data['key']` to locate data keys |
 
-### AbstractModel templatization rules
+---
 
-These are the rules that make a Pyomo model translatable.  Violating them
-produces models that cannot be vectorized correctly (or at all).
+## Writing translatable rules
 
-1. **No data-dependent branching inside rules.**
-   Rules must be pure arithmetic expressions over sets and parameters.
+1. **No data-dependent branching.**
    ```python
-   # GOOD
-   def supply_rule(m, i):
-       return sum(m.x[i, j] for j in m.J) <= m.Supply[i]
-
-   # BAD — if/else on data value
+   # BAD
    def supply_rule(m, i):
        if data['Supply'][i] > 0:
            return sum(m.x[i, j] for j in m.J) <= m.Supply[i]
        return pyo.Constraint.Skip
    ```
+   Pre-filter indices in preprocessing; every constraint row must be valid.
 
-2. **No arithmetic on index values inside rules.**
-   Pre-compute any derived index mappings in `preprocess_data` and store them
-   as Pyomo Sets.
+2. **No arithmetic on index values.** Pre-compute derived mappings as Pyomo Sets.
    ```python
-   # BAD — index arithmetic inside rule
-   def cover_rule(m, s, t):
-       return sum(m.starts[s, t - tau] for tau in range(ShiftLength)) >= m.Demand[s, t]
+   # BAD
+   sum(m.starts[s, t - tau] for tau in range(ShiftLength))
 
-   # GOOD — mapping pre-computed; rule iterates over a set
-   def cover_rule(m, s, t):
-       return sum(m.starts[s, tp] for tp in m.ValidStarts[t]) >= m.Demand[s, t]
+   # GOOD
+   sum(m.starts[s, tp] for tp in m.ValidStarts[t])
    ```
 
-3. **No generator conditions (`if` inside comprehensions).**
+3. **No generator conditions.**
    ```python
    # BAD
    sum(m.x[i, j] for j in m.J if data['active'][j])
 
    # GOOD — filter materialised as a Set
-   m.ActiveJ = pyo.Set(initialize=[j for j in data['J'] if data['active'][j]])
    sum(m.x[i, j] for j in m.ActiveJ)
    ```
 
-4. **Each constraint rule returns a single `Compare` expression.**
-   One comparison operator per return statement.  Chained comparisons such as
-   `0 <= expr <= UB` are not supported and will raise `NotImplementedError`.
+4. **One comparison operator per return.** Chained comparisons (`lb <= expr <= ub`) raise `NotImplementedError`.
 
-5. **No isolated nodes in flow-balance constraints.**
-   A node that has neither inbound nor outbound edges produces a trivially-True
-   Pyomo constraint (`0 == 0`) that crashes the persistent solver.
-   Filter such nodes in preprocessing.
+5. **No isolated nodes in flow-balance constraints.** A node with no edges produces a trivially-true `0 == 0` constraint that crashes the persistent solver. Filter in preprocessing.
 
 ---
 
-## Supported Pyomo declarations
-
-### `pyo.Set`
+## Supported declarations
 
 ```python
-m.S   = pyo.Set(initialize=data['S'])           # plain 1-D set
-m.E   = pyo.Set(dimen=2, initialize=data['E'])  # 2-D set (tuples)
-m.Sub = pyo.Set(within=m.S, initialize=data['Sub'])  # subset
-m.Rel = pyo.Set(m.S, initialize=data['Rel'])    # indexed set (dict of lists)
-```
+# Sets
+m.S   = pyo.Set(initialize=data['S'])                  # 1-D
+m.E   = pyo.Set(dimen=2, initialize=data['E'])          # 2-D (tuples)
+m.Sub = pyo.Set(within=m.S, initialize=data['Sub'])     # subset
+m.Rel = pyo.Set(m.S, initialize=data['Rel'])            # indexed (dict of lists)
 
-`dimen=` can be any integer.  Indexed sets (`pyo.Set(m.X, ...)`) are used for
-adjacency / rolling-window patterns (P5).
-
-### `pyo.Param`
-
-```python
-m.Alpha = pyo.Param(initialize=data['Alpha'])        # scalar
-m.Cost  = pyo.Param(m.I, initialize=data['Cost'])    # 1-D
+# Params
+m.Alpha = pyo.Param(initialize=data['Alpha'])           # scalar
+m.Cost  = pyo.Param(m.I, initialize=data['Cost'])       # 1-D
 m.BOM   = pyo.Param(m.P, m.C, initialize=data['BOM'])  # 2-D
+
+# Vars — domains: NonNegativeReals (default), NonNegativeIntegers, Binary
+m.x = pyo.Var(m.I, m.J, domain=pyo.NonNegativeReals)
+m.y = pyo.Var(m.I,      domain=pyo.NonNegativeIntegers)
+m.z = pyo.Var(m.F,      domain=pyo.Binary)
+
+# Objective — rule= or expr=, multi-term, param × var or plain var
+m.obj = pyo.Objective(rule=cost_obj, sense=pyo.minimize)
+
+# Constraints — rule= (indexed) or expr= (scalar only)
+m.c1 = pyo.Constraint(m.I, rule=some_rule)
+m.c2 = pyo.Constraint(expr=sum(m.Cost[f] * m.build[f] for f in m.F) <= data['Budget'])
 ```
 
 All parameters must be initialised from `data['key']`.
 
-### `pyo.Var`
-
-```python
-m.x = pyo.Var(m.I, m.J, domain=pyo.NonNegativeReals)   # continuous (default)
-m.y = pyo.Var(m.I, domain=pyo.NonNegativeIntegers)      # integer
-m.z = pyo.Var(m.F, domain=pyo.Binary)                   # binary
-```
-
-Supported domains: `NonNegativeReals`, `NonNegativeIntegers`, `Binary`.
-
-### `pyo.Objective`
-
-```python
-def cost_obj(m):
-    return sum(m.Cost[i] * m.x[i, t] for i in m.I for t in m.T)
-m.obj = pyo.Objective(rule=cost_obj, sense=pyo.minimize)
-```
-
-Supports a single `param * var` term with one or two generator clauses.
-
-### `pyo.Constraint`
-
-Constraints are translated by pattern (see next section).  Both the
-`rule=` form (indexed) and the `expr=` form (scalar, no index) are supported:
-
-```python
-m.c1 = pyo.Constraint(m.I, rule=some_rule)           # indexed
-m.c2 = pyo.Constraint(expr=sum(...) <= data['UB'])    # scalar inline
-```
-
 ---
 
-## The six translation patterns
+## Translation patterns
 
-### P1 — Groupby sum (indexed constraint, plain set iteration)
+### P1 — Groupby sum (plain set)
 
 ```python
 def supply_rule(m, i):
@@ -150,54 +106,39 @@ def supply_rule(m, i):
 m.supply_constr = pyo.Constraint(m.I, rule=supply_rule)
 ```
 
-Weighted variant (param × var):
-
+Weighted (param × var):
 ```python
 def machine_rule(m, mach):
     return sum(m.Efficiency[w] * m.assign[w, mach] for w in m.W) >= m.MinHours[mach]
-m.machine_constr = pyo.Constraint(m.M, rule=machine_rule)
 ```
 
-**Requirement:** iteration set must be a plain `pyo.Set` (not indexed).
+Iteration set must be a plain (non-indexed) `pyo.Set`.
 
 ---
 
-### P2 — Scalar global constraint (`expr=` or empty rule args)
+### P2 — Scalar global constraint
 
 ```python
-def budget_rule(m):
-    return sum(m.Cost[f] * m.build[f] for f in m.F) <= data['Budget']
-m.budget_constr = pyo.Constraint(rule=budget_rule)
-
-# Equivalent inline form:
 m.budget_constr = pyo.Constraint(
     expr=sum(m.Cost[f] * m.build[f] for f in m.F) <= data['Budget']
 )
 ```
 
-The constraint has **no index sets** (no `m.X` as positional args to
-`pyo.Constraint`).
+No index sets on `pyo.Constraint`. Works equally with `rule=` (zero args after `m`).
 
 ---
 
-### P3 — Flow balance (indexed or inline subtraction of two sums)
+### P3 — Flow balance (subtraction of two sums)
 
 ```python
-# Named-intermediate style
+# named-intermediate or inline — both work
 def flow_rule(m, node, k):
     flow_out = sum(m.x[node, j, k] for j in m.OutArcs[node])
     flow_in  = sum(m.x[i, node, k] for i in m.InArcs[node])
     return flow_out - flow_in == m.Demand[node, k]
-
-# Inline style (equivalent)
-def flow_rule(m, node, k):
-    return (sum(m.x[node, j, k] for j in m.OutArcs[node]) -
-            sum(m.x[i, node, k] for i in m.InArcs[node])) == m.Demand[node, k]
 ```
 
-**Requirement:** both sums iterate over **indexed sets** (`m.OutArcs[node]`,
-`m.InArcs[node]`).  The variable subscripts uniquely identify which index
-position is the "free" dimension for each sum.
+Both sums must iterate over **indexed sets** (`m.OutArcs[node]`, `m.InArcs[node]`).
 
 ---
 
@@ -209,40 +150,71 @@ def component_rule(m, c, t):
                                     for p in m.ProdsUsingComp[c])
 ```
 
-The iteration set must be indexed (`m.ProdsUsingComp[c]`) and the element
-must be `param × var` (in either order).
+Iteration set must be indexed; element must be `param × var`.
 
 ---
 
-### P5 — Universal adjacency (indexed set, pure var sum)
+### P5 — Indexed relation / subset (pure var sum)
 
 ```python
+# Rolling window
 def cover_rule(m, s, t):
     return sum(m.starts[s, tp] for tp in m.ValidStarts[t]) >= m.Demand[s, t]
 
+# Tuple loop variable
 def hub_rule(m, h):
     return sum(m.ship[orig, dest] for orig, dest in m.HubCoverage[h]) <= m.HubCap[h]
+
+# Indexed subset — outer index also in variable subscript
+def cap_rule(m, p):
+    return sum(m.x[p, w] for w in m.SubSet[p]) <= m.Cap[p]
 ```
 
-The iteration set must be indexed.  Tuple destructuring loop variables
-(`orig, dest`) are supported.
+Declare the indexed set as `pyo.Set(m.I, initialize=data['SubSet'])`.
+Tuple destructuring loop variables are supported.
+
+---
+
+### P_inter_add — Sum of independent terms
+
+```python
+def cap_rule(m, p):
+    return (sum(m.x_std[p, s] for s in m.S) +
+            sum(m.x_exp[p, e] for e in m.E)) <= m.Cap[p]
+```
+
+Any number of `sum(...)` calls joined by `+`; each may use a different variable.
+Works in `expr=` form too.
+
+---
+
+### P_intra_add — Linear combination inside a single sum
+
+```python
+# Any number of variables, any mix of index shapes, +/- and optional param weight
+def cap_rule(m, n):
+    return sum(m.x[n, t] + m.y[n, t] + m.z[n, t] for t in m.T) <= m.Cap[n]
+
+def demand_rule(m, p):
+    return sum(m.assign[p, w] + m.flex[w] for w in m.W) >= m.Demand[p]
+
+def net_rule(m, n):
+    return sum(m.Cost[t] * m.prod[n, t] - m.salvage[n, t] for t in m.T) <= m.Budget[n]
+```
 
 ---
 
 ### P6 — Direct variable access
 
 ```python
-# Simple
 def demand_rule(m, p, t):
     return m.build[p, t] >= m.Demand[p, t]
 
-# With subset filter
-def premium_rule(m, p, t):
-    return m.build[p, t] >= m.MinPremium
+# Subset filter
 m.premium_constr = pyo.Constraint(m.PremiumProducts, m.T, rule=premium_rule)
 ```
 
-The LHS is a direct subscript of a decision variable, not a sum.
+LHS is a direct variable subscript, not a sum.
 
 ---
 
@@ -250,61 +222,47 @@ The LHS is a direct subscript of a decision variable, not a sum.
 
 | Pattern | Alternative |
 |---|---|
-| `if`/`else` inside rules or generator conditions | Pre-filter into a Pyomo Set in preprocessing |
-| Arithmetic on index values (`t - 1`, `i + 1`) | Pre-compute the mapping as an indexed Set |
-| Chained comparisons (`lb <= expr <= ub`) | Split into two separate constraints |
-| Sum of two independent terms on LHS (`sum_A + sum_B`) | Not yet supported |
-| RHS computed from Python expressions (`data['A'] - data['B']`) | Store the result as a scalar Param |
-| `pyo.Constraint.Skip` or `pyo.Constraint.Feasible` | Not supported; ensure all nodes/indices are valid |
-| `pyo.Param` with `default=` keyword | Not supported; pre-fill missing entries in preprocessing |
-| Multiple variables in a single sum (`m.x[i] + m.y[i]`) | Not supported; use two separate constraints |
-| Objectives with multiple independent sum terms | Only one `param * var` term is supported per objective |
+| `if`/`else` inside rules or generator conditions | Pre-filter into a Pyomo Set |
+| Arithmetic on index values (`t - 1`, `i + 1`) | Pre-compute as an indexed Set |
+| Chained comparisons (`lb <= expr <= ub`) | Split into two constraints |
+| RHS as Python expression (`data['A'] - data['B']`) | Store result as a scalar Param |
+| `pyo.Constraint.Skip` / `.Feasible` | Ensure all indices are valid in preprocessing |
+| `pyo.Param(default=...)` | Pre-fill missing entries in preprocessing |
+| P3 (`sum - sum`) in `expr=` form | Use `rule=` for flow-balance constraints |
 
 ---
 
-## Preprocessing conventions
+## Preprocessing checklist
 
-These conventions make models robust and translator-compatible:
-
-```python
-def preprocess_data(raw):
-    # 1. Pre-compute indexed set relations
-    out_arcs = {n: [] for n in raw['Nodes']}
-    for i, j in raw['Edges']:
-        out_arcs[i].append(j)
-    raw['OutArcs'] = out_arcs
-
-    # 2. Fill sparse dicts to avoid missing-key errors
-    full_demand = {(n, k): 0 for n in raw['Nodes'] for k in raw['Commodities']}
-    full_demand.update(raw['Demand'])
-    raw['Demand'] = full_demand
-
-    # 3. Remove isolated nodes (nodes with no edges)
-    raw['ActiveNodes'] = sorted({n for e in raw['Edges'] for n in e})
-
-    return raw
-```
+- Pre-compute all indexed set relations (adjacency dicts, rolling-window mappings).
+- Fill sparse parameter dicts so no key is missing at solve time.
+- Filter out isolated nodes (no edges) from flow-balance sets.
 
 ---
 
-## Name mapping rules
+## Naming rule
 
-pandas requires exact MultiIndex level names for `groupby`, `merge`, and
-`reindex`.  The translator derives level names from the Pyomo rule function
-argument names — **the rule arg names become the index level names**.
+Rule argument names become pandas index level names throughout the generated
+code. Choose short, meaningful names (`i`, `t`, `node`) — they appear in every
+`groupby`, `merge`, and `reindex` call.
+
+---
+
+## Solve and populate API
 
 ```python
-# Rule arg 'i' → index level 'i' throughout
-def supply_rule(m, i):
-    return sum(m.x[i, j] for j in m.J) <= m.Supply[i]
+from translator import solve, populate_pyomo
+
+# Translate + build + optimize in one call
+gp_model, values = solve(build_pyomo_model, data)
+# gp_model — solved gp.Model; check gp_model.ObjVal, gp_model.SolCount, etc.
+# values   — {var_name: pd.Series(index → float)}, empty if infeasible
+
+# Load solution back into a Pyomo model
+pyo_model = build_pyomo_model(data)
+populate_pyomo(pyo_model, values)
+# pyo_model.x[i, j].value now holds the optimal value
 ```
-
-For variables indexed by a `dimen=2` set that never appears as a constraint
-index (e.g., an `Arcs` set only referenced inside a P3 sum), the translator
-infers dimension names from the loop variable names used in subscripts.
-
-Loop variable names that differ from the set name (e.g., `fac` instead of `f`)
-are automatically resolved to the index-level name registered from the rule args.
 
 ---
 
@@ -313,12 +271,18 @@ are automatically resolved to the index-level name registered from the rule args
 | File | Patterns covered |
 |---|---|
 | `example_1_supply.py` | P1 plain groupby |
-| `example_2_network.py` | P2 scalar, `dimen=2` var set, param × var |
+| `example_2_network.py` | P2 scalar, `dimen=2` var, param × var |
 | `example_3_multiflow.py` | P1, P3 flow balance (named intermediates) |
-| `example_4_bom.py` | P4 cross-dim merge, P6 direct var, subset, objective |
+| `example_4_bom.py` | P4, P6, subset, objective |
 | `example_5_shifts.py` | P5 rolling window, integer vars |
-| `example_6_set_cover.py` | P5 relation, P2 inline `expr=`, binary vars |
-| `example_7_tuple_relation.py` | P5 with tuple loop var |
-| `example_8_index_alignment.py` | P1 with 3-D var, groupby over middle dimension |
-| `example_9_inline_p3.py` | P3 flow balance written inline (no intermediate vars) |
-| `example_10_weighted_groupby.py` | P1 weighted (param × var, non-indexed set) |
+| `example_6_set_cover.py` | P5 relation, P2 `expr=`, binary vars |
+| `example_7_tuple_relation.py` | P5 tuple loop var |
+| `example_8_index_alignment.py` | P1 with 3-D var |
+| `example_9_inline_p3.py` | P3 inline (no intermediates) |
+| `example_10_weighted_groupby.py` | P1 weighted (param × var) |
+| `example_11_multi_term.py` | P_inter_add, multi-term objective |
+| `example_12_intra_sum.py` | P_intra_add (two vars, same shape) |
+| `example_13_inter_sum.py` | P_inter_add, multi-term objective |
+| `example_14_three_var_intra.py` | P_intra_add (three vars, same shape) |
+| `example_15_mixed_shape_intra.py` | P_intra_add (2-D + 1-D broadcast) |
+| `example_16_indexed_subset.py` | P5 indexed subset (`x[i,j]` over `SubSet[i]`) |

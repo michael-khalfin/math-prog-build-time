@@ -6,6 +6,9 @@ import examples.example_5_shifts as example_5_shifts
 import examples.example_6_set_cover as example_6_set_cover
 import examples.example_7_tuple_relation as example_7_tuple_relation
 import examples.example_8_index_alignment as example_8_index_alignment
+import examples.example_11_multi_term as example_11_multi_term
+import examples.example_12_intra_sum as example_12_intra_sum
+import examples.example_13_inter_sum as example_13_inter_sum
 from pyomo.environ import SolverFactory
 
 def test_model_equivalence(module, name):
@@ -42,3 +45,6 @@ if __name__ == "__main__":
     test_model_equivalence(example_6_set_cover, "Example 6 (Set Cover)")
     test_model_equivalence(example_7_tuple_relation, "Example 7 (Tuple Relation)")
     test_model_equivalence(example_8_index_alignment, "Example 8 (Index Alignment)")
+    test_model_equivalence(example_11_multi_term, "Example 11 (Multi-Term)")
+    test_model_equivalence(example_12_intra_sum, "Example 12 (Intra-Sum)")
+    test_model_equivalence(example_13_inter_sum, "Example 13 (Inter-Sum)")
