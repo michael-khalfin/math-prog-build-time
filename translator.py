@@ -1359,12 +1359,16 @@ class _CodeGen:
         keys_repr = '[' + ', '.join(f"'{k}'" for k in full_outer_names) + ']'
         self._emit(f"{rhs_sum_var} = {lagged_df}.groupby({keys_repr})['{term.var_name}'].sum()")
 
-        # Reindex against the LHS direct var's index
+        # Reindex both LHS selection and RHS against the constraint's declared index —
+        # not the variable's full domain — so that proper-subset constraint indices
+        # (sparse or Cartesian) produce exactly the right number of constraints.
         lhs_df = f'df_{ci.lhs_direct_var}'
-        self._emit(f"{rhs_sum_var} = {rhs_sum_var}.reindex({lhs_df}.index, fill_value=0.0)")
+        constr_idx = f'_idx_{suffix}'
+        self._emit_constr_index(ci, constr_idx)
+        self._emit(f"{rhs_sum_var} = {rhs_sum_var}.reindex({constr_idx}, fill_value=0.0)")
 
         sense = _gurobi_sense(ci.op)
-        self._emit(f"gppd.add_constrs(m, {lhs_df}['{ci.lhs_direct_var}'], {sense}, {rhs_sum_var}, name='{ci.pyomo_name}')")
+        self._emit(f"gppd.add_constrs(m, {lhs_df}['{ci.lhs_direct_var}'].loc[{constr_idx}], {sense}, {rhs_sum_var}, name='{ci.pyomo_name}')")
 
     # ------------------------------------------------------------------
     def _gen_P5(self, ci: ConstrInfo):
