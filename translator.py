@@ -1621,24 +1621,20 @@ class _CodeGen:
 
     # ------------------------------------------------------------------
     def _gen_P6(self, ci: ConstrInfo):
-        """Direct var access, with optional subset filter."""
+        """Direct var access — always restricted to the constraint's declared index.
+
+        Handles all three sub-cases uniformly:
+          • constraint index == variable domain  (most common — .loc is identity)
+          • constraint index is a proper subset  (whether or not declared with within=)
+          • constraint index is a sparse dimen=2 set  (from_tuples, not from_product)
+        """
         var_name = ci.lhs_direct_var
         df_var = f'df_{var_name}'
+        suffix = ci.pyomo_name
 
-        # Check for subset set
-        subset_set = None
-        for s in ci.index_sets:
-            si = self.t.sets.get(s)
-            if si and si.is_subset:
-                subset_set = si
-                break
-
-        if subset_set:
-            idx_var = f'{ci.pyomo_name}_idx'
-            self._emit(f"{idx_var} = pd.IndexSlice[data['{subset_set.data_key}'], :]")
-            lhs_repr = f"{df_var}.loc[{idx_var}, '{var_name}']"
-        else:
-            lhs_repr = f"{df_var}['{var_name}']"
+        constr_idx = f'_idx_{suffix}'
+        self._emit_constr_index(ci, constr_idx)
+        lhs_repr = f"{df_var}['{var_name}'].loc[{constr_idx}]"
 
         rhs_repr = self._rhs_repr(ci)
         sense = _gurobi_sense(ci.op)
