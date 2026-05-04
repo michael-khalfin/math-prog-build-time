@@ -108,6 +108,75 @@ def test_solve_api(module, name):
     print(f"  [PASS] {name}")
 
 
+def test_update_api(module, name):
+    """Test update_vectorized_model():
+    1. Build + solve with original data.
+    2. Build + solve with scaled data via a fresh Pyomo model (ground truth).
+    3. Call update_vectorized_model(m, scaled_data) + re-solve.
+    4. Verify objective values match the fresh Pyomo solve.
+    """
+    print(f"\nTesting update API for {name}...")
+
+    code = translate(module.build_pyomo_model)
+    if "def update_vectorized_model" not in code:
+        print(f"  (no update function generated — skip)")
+        return
+
+    ns = {}
+    exec(compile(code, "<translated>", "exec"), ns)
+    build_fn  = ns["build_vectorized_model"]
+    update_fn = ns["update_vectorized_model"]
+
+    # --- original solve ---
+    m = build_fn(module.data)
+    m.setParam("OutputFlag", 0)
+    m.optimize()
+    if m.SolCount == 0:
+        print(f"  (infeasible with original data — skip)")
+        return
+
+    # --- create scaled data: multiply every numeric leaf by 1.5 ---
+    import copy
+    def _scale(obj, factor=1.5):
+        if isinstance(obj, dict):
+            return {k: _scale(v, factor) for k, v in obj.items()}
+        if isinstance(obj, (int, float)):
+            return obj * factor
+        return obj   # lists, strings — unchanged
+
+    new_data = _scale(module.data)
+
+    # --- ground truth: fresh Pyomo solve with new_data ---
+    pyo_model2 = module.build_pyomo_model(new_data)
+    opt = SolverFactory("gurobi_persistent")
+    opt.set_instance(pyo_model2)
+    opt.solve()
+    pyo_gurobi2 = opt._solver_model
+    pyo_gurobi2.update()
+    if pyo_gurobi2.SolCount == 0:
+        print(f"  (infeasible with scaled data — skip)")
+        return
+
+    # --- update path ---
+    update_fn(m, new_data)
+    m.reset()
+    m.optimize()
+    if m.SolCount == 0:
+        assert pyo_gurobi2.SolCount == 0, (
+            "update() returned no solution but Pyomo did"
+        )
+        print(f"  (infeasible after update — skip)")
+        return
+
+    assert abs(m.ObjVal - pyo_gurobi2.ObjVal) < 1e-4 or (
+        abs(m.ObjVal) < 1e-8 and abs(pyo_gurobi2.ObjVal) < 1e-8
+    ), (
+        f"ObjVal mismatch after update: got {m.ObjVal:.6f}, "
+        f"expected {pyo_gurobi2.ObjVal:.6f}"
+    )
+    print(f"  [PASS] {name}")
+
+
 if __name__ == "__main__":
     examples = [
         (ex1,  "Example 1  (Supply)"),
@@ -153,6 +222,17 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"  [FAIL] {name}: {e}")
             failed.append(f"{name} [solve API]")
+
+    print()
+    print("=" * 60)
+    print("PHASE 3: update_vectorized_model() RHS hot-swap")
+    print("=" * 60)
+    for module, name in examples:
+        try:
+            test_update_api(module, name)
+        except Exception as e:
+            print(f"  [FAIL] {name}: {e}")
+            failed.append(f"{name} [update API]")
 
     print(f"\n{'=' * 60}")
     if failed:

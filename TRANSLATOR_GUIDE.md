@@ -1,10 +1,15 @@
-# Pyomo → gurobipy-pandas Translator Guide
+# Pyomo → COO/MVar Translator Guide
 
-`translate(func)` converts a `build_pyomo_model` function into the source of an
-equivalent `build_vectorized_model` function that uses gurobipy-pandas.
+`translate(func)` converts a `build_pyomo_model` function into the source of two
+equivalent functions that use Gurobi's matrix API directly:
+
+- **`build_vectorized_model(data)`** — builds the model using `addMVar` + `addMConstr`
+  (scipy sparse COO matrices, O(1) C-API calls per constraint block)
+- **`update_vectorized_model(m, new_data)`** — hot-swaps RHS values and the objective
+  on an already-built model via `MConstr.setAttr('RHS', ...)`, without rebuilding
 
 ```python
-from translator import translate, solve, populate_pyomo
+from translator import translate, solve, populate_pyomo, solution_proxy
 import examples.example_1_supply as ex1
 
 # Option A — inspect generated code
@@ -15,6 +20,15 @@ model = build_vectorized_model(ex1.data)
 # Option B — translate, solve, and get values back in one call
 gp_model, values = solve(ex1.build_pyomo_model, ex1.data)
 populate_pyomo(ex1.build_pyomo_model(ex1.data), values)
+
+# Option C — build once, then update RHS and re-solve (no rebuild)
+exec(compile(code, "<translated>", "exec"))
+m = build_vectorized_model(ex1.data)
+m.optimize()
+new_data = {**ex1.data, 'Supply': {'Plant_A': 200, 'Plant_B': 300}}
+update_vectorized_model(m, new_data)
+m.reset()
+m.optimize()
 ```
 
 ---
@@ -61,7 +75,7 @@ populate_pyomo(ex1.build_pyomo_model(ex1.data), values)
 
 4. **One comparison operator per return.** Chained comparisons (`lb <= expr <= ub`) raise `NotImplementedError`.
 
-5. **No isolated nodes in flow-balance constraints.** A node with no edges produces a trivially-true `0 == 0` constraint that crashes the persistent solver. Filter in preprocessing.
+5. **No isolated nodes in flow-balance constraints.** A node with no edges produces a trivially-true `0 == 0` constraint. Filter in preprocessing.
 
 ---
 
@@ -96,7 +110,82 @@ All parameters must be initialised from `data['key']`.
 
 ---
 
+## Generated code structure
+
+Every `build_vectorized_model` emits this skeleton:
+
+```python
+def build_vectorized_model(data):
+    import gurobipy as gp
+    import pandas as pd
+    import numpy as np
+    import scipy.sparse
+    m = gp.Model()
+    m._mconstr = {}   # name → MConstr, for update_vectorized_model
+    m._rhs_ord  = {}  # name → index ordering used when RHS was set
+    m._mvars    = {}  # var_name → MVar
+    m._var_idx  = {}  # var_name → pd.MultiIndex
+
+    # --- variable blocks ---
+    _idx_x  = pd.MultiIndex.from_product([data['I'], data['J']], names=['i', 'j'])
+    _var_x  = m.addMVar(len(_idx_x), lb=0.0, name='x')
+    _flat_x = pd.DataFrame({'_col': np.arange(len(_idx_x))}, index=_idx_x).reset_index()
+    m._mvars['x'] = _var_x
+    m._var_idx['x'] = _idx_x
+
+    # --- param blocks ---
+    s_supply = pd.Series(data['Supply'], name='supply').rename_axis('i')
+
+    # --- objective (if present) ---
+    _c_obj = s_cost.reindex(_idx_x, level='i').values
+    m.setObjective(_c_obj @ _var_x, gp.GRB.MINIMIZE)
+
+    # --- constraint blocks (see patterns below) ---
+    ...
+
+    # --- solution accessor ---
+    m._get_values = lambda: {'x': pd.Series(_var_x.X, index=_idx_x)}
+    return m
+```
+
+The companion `update_vectorized_model` follows immediately:
+
+```python
+def update_vectorized_model(m, new_data):
+    import gurobipy as gp
+    import pandas as pd
+    import numpy as np
+    # Re-initialise params
+    s_supply = pd.Series(new_data['Supply'], name='supply').rename_axis('i')
+    # Hot-swap RHS vectors
+    if 'supply_constr' in m._mconstr:
+        m._mconstr['supply_constr'].setAttr('RHS',
+            s_supply.reindex(m._rhs_ord['supply_constr']).values)
+    # Re-set objective coefficients if model has an objective
+    ...
+    return m
+```
+
+Call `m.reset()` before re-optimising after an update (clears the incumbent
+without discarding the constraint matrix).
+
+**What update does NOT change:** the sparsity structure (A matrix), variable
+bounds, variable types, or the index sets. If any of those need to change,
+call `build_vectorized_model` again.
+
+---
+
 ## Translation patterns
+
+All patterns follow the same COO construction recipe:
+
+1. Build `_flat_{var}` — a DataFrame with a `_col` ordinal for each variable slot.
+2. Build `_constr_{name}` — a DataFrame with a `_row` ordinal for each constraint row.
+3. `pd.merge` on shared index keys → (row, col) pairs.
+4. `scipy.sparse.csr_matrix((vals, (rows, cols)), shape=(m, n))` → constraint matrix A.
+5. `m.addMConstr(A, mvar, sense, b)` or `m.addConstr((A1@v1 + A2@v2) op b)`.
+
+---
 
 ### P1 — Groupby sum (plain set)
 
@@ -106,11 +195,23 @@ def supply_rule(m, i):
 m.supply_constr = pyo.Constraint(m.I, rule=supply_rule)
 ```
 
-Weighted (param × var):
+Generated:
 ```python
-def machine_rule(m, mach):
-    return sum(m.Efficiency[w] * m.assign[w, mach] for w in m.W) >= m.MinHours[mach]
+_constr_supply_constr = pd.DataFrame({'_row': np.arange(len(s_supply))},
+                                      index=s_supply.index).reset_index()
+_coo_supply_constr = pd.merge(_flat_x, _constr_supply_constr, on=['i'])
+_A_supply_constr = scipy.sparse.csr_matrix(
+    (np.ones(len(_coo_supply_constr)),
+     (_coo_supply_constr['_row'].values, _coo_supply_constr['_col'].values)),
+    shape=(len(s_supply), len(_idx_x)))
+m._mconstr['supply_constr'] = m.addMConstr(
+    _A_supply_constr, _var_x, gp.GRB.LESS_EQUAL, s_supply.values,
+    name='supply_constr')
+m._rhs_ord['supply_constr'] = s_supply.index
 ```
+
+Weighted variant (`param × var`) works identically; coefficient values replace
+`np.ones(...)` in the sparse matrix.
 
 Iteration set must be a plain (non-indexed) `pyo.Set`.
 
@@ -124,18 +225,37 @@ m.budget_constr = pyo.Constraint(
 )
 ```
 
-No index sets on `pyo.Constraint`. Works equally with `rule=` (zero args after `m`).
+Generated: a single `m.addLConstr(lhs <= rhs, name=...)` using a dense dot
+product. No sparse matrix needed.
 
 ---
 
 ### P3 — Flow balance (subtraction of two sums)
 
 ```python
-# named-intermediate or inline — both work
 def flow_rule(m, node, k):
     flow_out = sum(m.x[node, j, k] for j in m.OutArcs[node])
     flow_in  = sum(m.x[i, node, k] for i in m.InArcs[node])
-    return flow_out - flow_in == m.Demand[node, k]
+    return flow_out - flow_in == m.Dem[node, k]
+m.flow_constr = pyo.Constraint(m.N, m.K, rule=flow_rule)
+```
+
+Generated: two merge passes (+1 / −1 coefficients), concatenated into one COO
+and assembled into a single `addMConstr`.
+
+```python
+_constr_fwd_flow_constr = _constr_flow_constr.rename(columns={'node': 'i'})
+_fwd_flow_constr = pd.merge(_flat_x, _constr_fwd_flow_constr, on=['i', 'k'])
+_constr_bwd_flow_constr = _constr_flow_constr.rename(columns={'node': 'j'})
+_bwd_flow_constr = pd.merge(_flat_x, _constr_bwd_flow_constr, on=['j', 'k'])
+_coo_flow_constr = pd.concat([
+    _fwd_flow_constr.assign(_val=1.0),
+    _bwd_flow_constr.assign(_val=-1.0)], ignore_index=True)
+_A_flow_constr = scipy.sparse.csr_matrix(
+    (_coo_flow_constr['_val'].values, ...),
+    shape=(len(s_demand), len(_idx_x)))
+m._mconstr['flow_constr'] = m.addMConstr(
+    _A_flow_constr, _var_x, gp.GRB.EQUAL, s_demand.values, name='flow_constr')
 ```
 
 Both sums must iterate over **indexed sets** (`m.OutArcs[node]`, `m.InArcs[node]`).
@@ -150,28 +270,50 @@ def component_rule(m, c, t):
                                     for p in m.ProdsUsingComp[c])
 ```
 
-Iteration set must be indexed; element must be `param × var`.
+Generated: two A-matrix blocks (`_A_sum` for the RHS sum, `_A_neg` for the LHS
+variable) assembled with `addConstr((A_sum @ build + A_neg @ buy) == 0)`.
+
+```python
+_fp_component_constr = s_bom.reset_index()
+_m1_component_constr = pd.merge(_fp_component_constr, _flat_build, on='p')
+_coo_component_constr = pd.merge(_m1_component_constr, _constr_component_constr, on=['c', 't'])
+_A_sum_component_constr = scipy.sparse.csr_matrix(
+    (_coo_component_constr['bom'].values, ...), shape=(...))
+_dc_component_constr = pd.merge(_constr_component_constr, _flat_buy_comp, on=['c', 't'])
+_A_neg_component_constr = scipy.sparse.csr_matrix(
+    (-np.ones(len(_dc_component_constr)), ...), shape=(...))
+m._mconstr['component_constr'] = m.addConstr(
+    (_A_sum_component_constr @ _var_build + _A_neg_component_constr @ _var_buy_comp)
+    == np.zeros(len(_idx_component_constr)), name='component_constr')
+```
 
 ---
 
-### P5 — Indexed relation / subset (pure var sum)
+### P5 — Indexed relation / rolling window
 
 ```python
-# Rolling window
 def cover_rule(m, s, t):
     return sum(m.starts[s, tp] for tp in m.ValidStarts[t]) >= m.Demand[s, t]
-
-# Tuple loop variable
-def hub_rule(m, h):
-    return sum(m.ship[orig, dest] for orig, dest in m.HubCoverage[h]) <= m.HubCap[h]
-
-# Indexed subset — outer index also in variable subscript
-def cap_rule(m, p):
-    return sum(m.x[p, w] for w in m.SubSet[p]) <= m.Cap[p]
 ```
 
-Declare the indexed set as `pyo.Set(m.I, initialize=data['SubSet'])`.
-Tuple destructuring loop variables are supported.
+Generated: an explicit time-mapping DataFrame is built from the dict-of-lists,
+merged with `_flat_starts` to get (row, col) pairs, then passed to `addMConstr`.
+
+```python
+_mapping_cover_constr = [(t, tp) for t, _inner in data['ValidStarts'].items()
+                          for tp in _inner]
+_map_cover_constr  = pd.DataFrame(_mapping_cover_constr, columns=['t', 'tp'])
+_reset_cover_constr = _flat_starts.rename(columns={'t': 'tp'})
+_lagged_cover_constr = pd.merge(_map_cover_constr, _reset_cover_constr, on='tp')
+_coo_cover_constr   = pd.merge(_lagged_cover_constr, _constr_cover_constr, on=['s', 't'])
+_A_cover_constr = scipy.sparse.csr_matrix(
+    (np.ones(len(_coo_cover_constr)), ...), shape=(len(s_demand), len(_idx_starts)))
+m._mconstr['cover_constr'] = m.addMConstr(
+    _A_cover_constr, _var_starts, gp.GRB.GREATER_EQUAL, s_demand.values,
+    name='cover_constr')
+```
+
+Tuple destructuring loop variables (`orig, dest`) are supported.
 
 ---
 
@@ -183,24 +325,20 @@ def cap_rule(m, p):
             sum(m.x_exp[p, e] for e in m.E)) <= m.Cap[p]
 ```
 
-Any number of `sum(...)` calls joined by `+`; each may use a different variable.
-Works in `expr=` form too.
+Generated: one A matrix per sum term; constraint assembled with
+`m.addConstr((A1 @ v1 + A2 @ v2) <= b)`.
 
 ---
 
 ### P_intra_add — Linear combination inside a single sum
 
 ```python
-# Any number of variables, any mix of index shapes, +/- and optional param weight
-def cap_rule(m, n):
-    return sum(m.x[n, t] + m.y[n, t] + m.z[n, t] for t in m.T) <= m.Cap[n]
-
-def demand_rule(m, p):
-    return sum(m.assign[p, w] + m.flex[w] for w in m.W) >= m.Demand[p]
-
 def net_rule(m, n):
     return sum(m.Cost[t] * m.prod[n, t] - m.salvage[n, t] for t in m.T) <= m.Budget[n]
 ```
+
+Generated: one A matrix per variable term (signs baked into values);
+assembled with `m.addConstr((A0 @ v0 + A1 @ v1) <= b)`.
 
 ---
 
@@ -214,7 +352,68 @@ def demand_rule(m, p, t):
 m.premium_constr = pyo.Constraint(m.PremiumProducts, m.T, rule=premium_rule)
 ```
 
-LHS is a direct variable subscript, not a sum.
+Generated: identity-like COO (one nonzero per row) assembled from a merge of
+the constraint index against `_flat_{var}`.
+
+---
+
+## Solve and populate API
+
+```python
+from translator import solve, solution_proxy, populate_pyomo
+
+# Translate + build + optimize in one call
+gp_model, values = solve(build_pyomo_model, data)
+# gp_model — solved gp.Model; inspect gp_model.ObjVal, gp_model.SolCount, etc.
+# values   — {var_name: pd.Series(index → float)}, empty if infeasible
+
+# Access solution values — zero-cost, no Pyomo model built
+sol = solution_proxy(values)
+sol.x['i1', 'j1'].value   # same interface as pyo_model.x['i1', 'j1'].value
+
+# Round-trip values back into a Pyomo model
+pyo_m = build_pyomo_model(data)
+populate_pyomo(pyo_m, values)
+```
+
+---
+
+## Update API
+
+```python
+from translator import translate
+
+code = translate(build_pyomo_model)
+exec(compile(code, "<translated>", "exec"))
+
+# Build once
+m = build_vectorized_model(data)
+m.setParam('OutputFlag', 0)
+m.optimize()
+
+# Change RHS/objective, re-solve without rebuilding
+update_vectorized_model(m, new_data)
+m.reset()       # clears incumbent; keeps A, bounds, types
+m.optimize()
+```
+
+`update_vectorized_model` updates:
+- **RHS vectors** for all constraints whose RHS param fully covers the
+  constraint dimension (tracked in `m._rhs_ord`).
+- **Objective coefficients** if the model has a parameterised objective.
+
+It does **not** update: the A matrix, variable bounds, variable types, or index
+sets. Rebuild with `build_vectorized_model` if the structure changes.
+
+### Model attributes stored for update
+
+| Attribute | Type | Purpose |
+|---|---|---|
+| `m._mconstr` | `dict[str, MConstr]` | Constraint objects, keyed by Pyomo name |
+| `m._rhs_ord` | `dict[str, pd.Index]` | Index ordering used when RHS was set |
+| `m._mvars` | `dict[str, MVar]` | Variable MVar objects |
+| `m._var_idx` | `dict[str, pd.MultiIndex]` | Variable index (for re-indexing params) |
+| `m._get_values` | `lambda` | `() → {var_name: pd.Series}` after solve |
 
 ---
 
@@ -244,28 +443,7 @@ LHS is a direct variable subscript, not a sum.
 
 Rule argument names become pandas index level names throughout the generated
 code. Choose short, meaningful names (`i`, `t`, `node`) — they appear in every
-`groupby`, `merge`, and `reindex` call.
-
----
-
-## Solve and populate API
-
-```python
-from translator import solve, solution_proxy
-
-# Translate + build + optimize in one call
-gp_model, values = solve(build_pyomo_model, data)
-# gp_model — solved gp.Model; check gp_model.ObjVal, gp_model.SolCount, etc.
-# values   — {var_name: pd.Series(index → float)}, empty if infeasible
-
-# Access solution values — zero-cost, no Pyomo constraints built
-sol = solution_proxy(values)
-sol.x['i1', 'j1'].value   # identical interface to pyo_model.x['i1', 'j1'].value
-```
-
-`solution_proxy` wraps the `values` dict in a thin mock that duck-types Pyomo's
-`.value` attribute.  It costs nothing to construct — no Pyomo model is built,
-no constraint matrices are generated.
+`merge`, `rename`, and `reindex` call.
 
 ---
 
@@ -289,3 +467,6 @@ no constraint matrices are generated.
 | `example_14_three_var_intra.py` | P_intra_add (three vars, same shape) |
 | `example_15_mixed_shape_intra.py` | P_intra_add (2-D + 1-D broadcast) |
 | `example_16_indexed_subset.py` | P5 indexed subset (`x[i,j]` over `SubSet[i]`) |
+| `example_17_subset_tuple.py` | P5 tuple destructuring in indexed set |
+| `example_18_lhs_equality.py` | P6 with equality constraint |
+| `example_19_jk_secretary.py` | P_inter_add + P6, multi-var objective |

@@ -858,19 +858,18 @@ class _CodeGen:
         prefix = '    ' * indent
         self.lines.append(prefix + line if line else '')
 
-    def generate(self) -> str:
-        """Generate build_vectorized_model (and update_vectorized_model) source."""
+    def generate(self, extended: bool = False) -> str:
+        """Generate build_vectorized_model source.
+
+        When extended=True the generated function returns (model, {var_name: series})
+        instead of just model, so callers can extract solved variable values.
+        """
         self.lines = []
         self._emit('def build_vectorized_model(data):', indent=0)
         self._emit('import gurobipy as gp')
+        self._emit('import gurobipy_pandas as gppd')
         self._emit('import pandas as pd')
-        self._emit('import numpy as np')
-        self._emit('import scipy.sparse')
         self._emit('m = gp.Model()')
-        self._emit('m._mconstr = {}')
-        self._emit('m._rhs_ord = {}')
-        self._emit('m._mvars = {}')
-        self._emit('m._var_idx = {}')
         self._emit()
 
         self._gen_vars()
@@ -882,15 +881,15 @@ class _CodeGen:
         for ci in self.t.constrs:
             self._gen_constraint(ci)
 
-        # Lazy value extractor attached to model (used by solve())
-        extracts = ', '.join(
-            f"'{vn}': pd.Series(_var_{vn}.X, index=_idx_{vn})"
-            for vn in self.t._var_order
-        )
-        self._emit(f'm._get_values = lambda: {{{extracts}}}')
-        self._emit('return m')
-
-        self._gen_update_function()
+        if extended:
+            vars_repr = (
+                '{' +
+                ', '.join(f"'{vn}': df_{vn}['{vn}']" for vn in self.t._var_order) +
+                '}'
+            )
+            self._emit(f'return m, {vars_repr}')
+        else:
+            self._emit('return m')
         return '\n'.join(self.lines)
 
     # ------------------------------------------------------------------
@@ -902,53 +901,58 @@ class _CodeGen:
 
     def _emit_var(self, vi: VarInfo):
         all_names = self.r.all_names_for_var(vi)
+        if vi.vtype == 'INTEGER':
+            vtype_str = ', vtype=gp.GRB.INTEGER'
+        elif vi.vtype == 'BINARY':
+            vtype_str = ', vtype=gp.GRB.BINARY'
+        else:
+            vtype_str = ''
 
+        # Determine if any set has dimen > 1
         has_tuple_set = any(
             (self.t.sets.get(s) or SetInfo('', '')).dimen > 1
             for s in vi.index_sets
         )
 
-        idx_var  = f'_idx_{vi.pyomo_name}'
-        var_obj  = f'_var_{vi.pyomo_name}'
-        flat_var = f'_flat_{vi.pyomo_name}'
+        df_var = f'df_{vi.pyomo_name}'
+        idx_var = f'idx_{vi.pyomo_name}'
+
         names_repr = ', '.join(f"'{n}'" for n in all_names)
 
         if has_tuple_set:
-            parts, loop_parts = [], []
+            # Build list-of-tuples comprehension
+            parts = []
+            loop_parts = []
             for s in vi.index_sets:
                 si = self.t.sets.get(s)
                 dimen = si.dimen if si else 1
                 if dimen > 1:
                     ns = self.r.names_for(s)
-                    loop_parts.append(f"({', '.join(ns)}) in data['{si.data_key}']")
+                    tup = ', '.join(ns)
+                    loop_parts.append(f"({tup}) in data['{si.data_key}']")
                     parts.extend(ns)
                 else:
                     n = self.r.names_for(s)[0]
                     loop_parts.append(f"{n} in data['{(si.data_key if si else s)}']")
                     parts.append(n)
-            self._emit(f"{idx_var}_tuples = [({', '.join(parts)}) for {' for '.join(loop_parts)}]")
+            inner_tup = ', '.join(parts)
+            loops = ' for '.join(loop_parts)
+            self._emit(f"{idx_var}_tuples = [({inner_tup}) for {loops}]")
             self._emit(f"{idx_var} = pd.MultiIndex.from_tuples({idx_var}_tuples, names=[{names_repr}])")
         else:
+            sets_repr_parts = []
+            for s in vi.index_sets:
+                si = self.t.sets.get(s)
+                key = si.data_key if si else s
+                sets_repr_parts.append(f"data['{key}']")
+            sets_repr = ', '.join(sets_repr_parts)
             if len(vi.index_sets) == 1:
-                key = self.t.sets[vi.index_sets[0]].data_key
-                self._emit(f"{idx_var} = pd.Index(data['{key}'], name='{all_names[0]}')")
+                self._emit(f"{idx_var} = pd.Index(data['{self.t.sets[vi.index_sets[0]].data_key}'], name='{all_names[0]}')")
             else:
-                sets_repr = ', '.join(
-                    f"data['{(self.t.sets.get(s) or SetInfo('', s)).data_key}']"
-                    for s in vi.index_sets
-                )
                 self._emit(f"{idx_var} = pd.MultiIndex.from_product([{sets_repr}], names=[{names_repr}])")
 
-        if vi.vtype == 'BINARY':
-            self._emit(f"{var_obj} = m.addMVar(len({idx_var}), vtype=gp.GRB.BINARY, name='{vi.pyomo_name}')")
-        elif vi.vtype == 'INTEGER':
-            self._emit(f"{var_obj} = m.addMVar(len({idx_var}), lb=0.0, vtype=gp.GRB.INTEGER, name='{vi.pyomo_name}')")
-        else:
-            self._emit(f"{var_obj} = m.addMVar(len({idx_var}), lb=0.0, name='{vi.pyomo_name}')")
-
-        self._emit(f"{flat_var} = pd.DataFrame({{'_col': np.arange(len({idx_var}))}}, index={idx_var}).reset_index()")
-        self._emit(f"m._mvars['{vi.pyomo_name}'] = {var_obj}")
-        self._emit(f"m._var_idx['{vi.pyomo_name}'] = {idx_var}")
+        self._emit(f"{df_var} = pd.DataFrame(index={idx_var})")
+        self._emit(f"{df_var} = {df_var}.gppd.add_vars(m{vtype_str}, name='{vi.pyomo_name}')")
 
     # ------------------------------------------------------------------
     def _gen_params(self):
@@ -982,67 +986,51 @@ class _CodeGen:
         return f's_{pyomo_name.lower()}'
 
     # ------------------------------------------------------------------
-    def _gen_objective(self, new_data: bool = False):
-        """Emit the objective.
-
-        new_data=True is used by _gen_update_function: substitutes 'data' with
-        'new_data' and '_var_x' / '_idx_x' with 'm._mvars[x]' / 'm._var_idx[x]'.
-        """
+    def _gen_objective(self):
         obj = self.t.obj
         if not obj.lhs_terms:
             return
         signs = obj.signs if obj.signs else [1] * len(obj.lhs_terms)
-        d = 'new_data' if new_data else 'data'
         self._emit('# Objective')
-        obj_parts = []
+        part_vars = []
+        part_signs = []
         for i, (term, sign) in enumerate(zip(obj.lhs_terms, signs)):
             pi = self.t.params.get(term.param_name) if term.param_name else None
             vi = self.t.vars.get(term.var_name)
-            idx_v = (f"m._var_idx['{term.var_name}']" if new_data
-                     else f'_idx_{term.var_name}')
-            var_v = (f"m._mvars['{term.var_name}']" if new_data
-                     else f'_var_{term.var_name}')
+            df_var = f'df_{term.var_name}'
+            part = f'_obj_t{i}'
             coeff = term.scalar_coeff
-            c_var = f'_c_obj_t{i}'
-
             if pi and pi.index_sets:
-                param_s = f's_{pi.pyomo_name.lower()}'
                 param_col = pi.pyomo_name.lower()
+                joined = f'df_{term.var_name}_obj_{i}'
+                # Determine join style: full-index alignment vs broadcast
                 param_dims = []
                 for ps in pi.index_sets:
                     param_dims.extend(self.r.names_for(ps))
                 all_var_dims = self.r.all_names_for_var(vi) if vi else []
-                # Re-extract param from new_data if needed
-                if new_data:
-                    si_pi = self.t.params[pi.pyomo_name]
-                    ax = ('[' + ', '.join(f"'{n}'" for n in param_dims) + ']'
-                          if len(param_dims) > 1 else f"'{param_dims[0]}'")
-                    self._emit(f"{param_s} = pd.Series({d}['{si_pi.data_key}'], name='{param_col}').rename_axis({ax})")
                 if sorted(param_dims) == sorted(all_var_dims):
-                    self._emit(f"{c_var} = {param_s}.reindex({idx_v}).values")
+                    self._emit(f"{joined} = {df_var}.join(s_{pi.pyomo_name.lower()})")
                 elif len(param_dims) == 1:
-                    self._emit(f"{c_var} = {param_s}.reindex({idx_v}, level='{param_dims[0]}').values")
+                    self._emit(f"{joined} = {df_var}.join(s_{pi.pyomo_name.lower()}, on='{param_dims[0]}')")
                 else:
-                    self._emit(f"{c_var} = {param_s}.reindex({idx_v}).values")
-                if coeff != 1.0:
-                    self._emit(f"{c_var} = {c_var} * {coeff}")
-            elif pi and not pi.index_sets:
-                # Scalar param
-                scalar_val = pi.pyomo_name.lower()
-                if new_data:
-                    self._emit(f"{scalar_val} = {d}['{pi.data_key}']")
-                val = f'{coeff} * {scalar_val}' if coeff != 1.0 else scalar_val
-                self._emit(f"{c_var} = np.full(len({idx_v}), {val})")
+                    on_repr = '[' + ', '.join(f"'{d}'" for d in param_dims) + ']'
+                    self._emit(f"{joined} = {df_var}.join(s_{pi.pyomo_name.lower()}, on={on_repr})")
+                inner = f"{joined}['{param_col}'] * {joined}['{term.var_name}']"
+                inner = f"{coeff} * {inner}" if coeff != 1.0 else inner
+                self._emit(f"{part} = ({inner}).sum()")
             else:
-                val = str(coeff) if coeff != 1.0 else '1.0'
-                self._emit(f"{c_var} = np.full(len({idx_v}), {val})")
-
-            term_expr = f'{c_var} @ {var_v}'
+                inner = f"{df_var}['{term.var_name}']"
+                inner = f"{coeff} * {inner}" if coeff != 1.0 else inner
+                self._emit(f"{part} = ({inner}).sum()")
+            part_vars.append(part)
+            part_signs.append(sign)
+        # Assemble signed objective expression
+        obj_parts = []
+        for pv, sign in zip(part_vars, part_signs):
             if not obj_parts:
-                obj_parts.append(f'-{c_var} @ {var_v}' if sign < 0 else term_expr)
+                obj_parts.append(f"-{pv}" if sign < 0 else pv)
             else:
-                obj_parts.append(f'- {c_var} @ {var_v}' if sign < 0 else f'+ {term_expr}')
-
+                obj_parts.append(f"- {pv}" if sign < 0 else f"+ {pv}")
         obj_expr = ' '.join(obj_parts)
         sense_str = f"gp.GRB.{'MINIMIZE' if obj.sense == 'MINIMIZE' else 'MAXIMIZE'}"
         self._emit(f"m.setObjective({obj_expr}, {sense_str})")
@@ -1072,276 +1060,121 @@ class _CodeGen:
         self._emit()
 
     # ------------------------------------------------------------------
-    def _emit_constr_rows_df(self, ci: ConstrInfo, suffix: str):
-        """Emit constraint ordering DataFrame (_constr_{suffix}) and return (df_name, n_repr, rhs_s).
-
-        The DataFrame has columns [*constr_index_names, '_row'] where _row is
-        the ordinal row number in the constraint block's sparse matrix.
-        Builds from the RHS param series only when its dimensions EXACTLY cover
-        all constraint index dimensions; otherwise falls back to _emit_constr_index.
-        """
-        rhs_pi = self._rhs_param(ci)
-        constr_df = f'_constr_{suffix}'
-        if rhs_pi and rhs_pi.index_sets:
-            rhs_s = f's_{rhs_pi.pyomo_name.lower()}'
-            # Only use rhs_s if param dims cover ALL constraint dims
-            param_dim_names = []
-            for s in rhs_pi.index_sets:
-                param_dim_names.extend(self.r.names_for(s))
-            constr_dim_names = []
-            for s in ci.index_sets:
-                constr_dim_names.extend(self.r.names_for(s))
-            if set(param_dim_names) == set(constr_dim_names):
-                self._emit(
-                    f"{constr_df} = pd.DataFrame({{'_row': np.arange(len({rhs_s}))}}, "
-                    f"index={rhs_s}.index).reset_index()"
-                )
-                return constr_df, f'len({rhs_s})', rhs_s
-        # Explicit build from constraint index sets
-        idx_v = f'_idx_{suffix}'
-        self._emit_constr_index(ci, idx_v)
-        self._emit(
-            f"{constr_df} = pd.DataFrame({{'_row': np.arange(len({idx_v}))}}, "
-            f"index={idx_v}).reset_index()"
-        )
-        return constr_df, f'len({idx_v})', None
-
-    def _b_repr_from_constr(self, ci: ConstrInfo, suffix: str, n_repr: str, rhs_s: Optional[str]) -> str:
-        """Return the numpy b-vector expression for addMConstr."""
-        if rhs_s:
-            return f'{rhs_s}.values'
-        rhs_pi = self._rhs_param(ci)
-        if rhs_pi and not rhs_pi.index_sets:
-            return f'np.full({n_repr}, {rhs_pi.pyomo_name.lower()})'
-        if rhs_pi and rhs_pi.index_sets:
-            # Lower-dim param: reindex onto the full constraint index
-            param_dim_names = []
-            for s in rhs_pi.index_sets:
-                param_dim_names.extend(self.r.names_for(s))
-            rhs_var = f's_{rhs_pi.pyomo_name.lower()}'
-            idx_v   = f'_idx_{suffix}'
-            if len(param_dim_names) == 1:
-                return f'{rhs_var}.reindex({idx_v}, level=\'{param_dim_names[0]}\').values'
-            levels_repr = '[' + ', '.join(f"'{n}'" for n in param_dim_names) + ']'
-            return f'{rhs_var}.reindex({idx_v}, level={levels_repr}).values'
-        rhs_repr = self._rhs_repr(ci)
-        if isinstance(ci.rhs_node, ast.Constant):
-            return f'np.full({n_repr}, {ci.rhs_node.value})'
-        return f'np.full({n_repr}, {rhs_repr})'
-
-    # ------------------------------------------------------------------
     def _gen_P1(self, ci: ConstrInfo):
         term = ci.lhs_terms[0]
-        flat_v   = f'_flat_{term.var_name}'
-        var_obj  = f'_var_{term.var_name}'
-        idx_v    = f'_idx_{term.var_name}'
-        suffix   = ci.pyomo_name
+        vi = self.t.vars[term.var_name]
+        df_var = f'df_{term.var_name}'
+        lhs_var = f'lhs_{ci.pyomo_name}'
 
+        # Groupby keys: rule_args (constraint index names)
         groupby_keys = []
         for s in ci.index_sets:
             groupby_keys.extend(self.r.names_for(s))
         keys_repr = '[' + ', '.join(f"'{k}'" for k in groupby_keys) + ']'
 
-        constr_df, n_repr, rhs_s = self._emit_constr_rows_df(ci, suffix)
-        coo = f'_coo_{suffix}'
-
         if term.param_name:
             pi = self.t.params[term.param_name]
-            param_s   = f's_{pi.pyomo_name.lower()}'
-            param_key = self.r.names_for(pi.index_sets[0])[0] if pi.index_sets else None
-            self._emit(f"{coo} = pd.merge({flat_v}, {constr_df}, on={keys_repr})")
-            self._emit(f"{coo} = {coo}.assign(_val={coo}['{param_key}'].map({param_s}))")
-            val_repr = f"{coo}['_val'].values"
+            param_col  = pi.pyomo_name.lower()
+            param_s    = f's_{pi.pyomo_name.lower()}'
+            joined_df  = f'_df_{ci.pyomo_name}_w'
+            # join on the dimension the param is indexed by so the 1-D series
+            # aligns correctly onto a multi-level variable index
+            on_dim = self.r.names_for(pi.index_sets[0])[0] if pi.index_sets else None
+            self._emit(f"{joined_df} = {df_var}.join({param_s}, on='{on_dim}')")
+            self._emit(
+                f"{lhs_var} = ({joined_df}['{param_col}'] * {joined_df}['{term.var_name}']).groupby({keys_repr}).sum()"
+            )
         else:
-            self._emit(f"{coo} = pd.merge({flat_v}, {constr_df}, on={keys_repr})")
-            val_repr = f'np.ones(len({coo}))'
+            self._emit(f"{lhs_var} = {df_var}.groupby({keys_repr})['{term.var_name}'].sum()")
 
-        self._emit(
-            f"_A_{suffix} = scipy.sparse.csr_matrix("
-            f"({val_repr}, ({coo}['_row'].values, {coo}['_col'].values)), "
-            f"shape=({n_repr}, len({idx_v})))"
-        )
-        b = self._b_repr_from_constr(ci, suffix, n_repr, rhs_s)
+        rhs_repr = self._rhs_repr(ci)
         sense = _gurobi_sense(ci.op)
-        self._emit(f"m._mconstr['{ci.pyomo_name}'] = m.addMConstr(_A_{suffix}, {var_obj}, {sense}, {b}, name='{ci.pyomo_name}')")
-        if rhs_s:
-            self._emit(f"m._rhs_ord['{ci.pyomo_name}'] = {rhs_s}.index")
+        self._emit(f"gppd.add_constrs(m, {lhs_var}, {sense}, {rhs_repr}, name='{ci.pyomo_name}')")
 
     # ------------------------------------------------------------------
     def _gen_P2(self, ci: ConstrInfo):
-        """Scalar (single-row) constraint — 1×n sparse matrix."""
         term = ci.lhs_terms[0]
-        flat_v  = f'_flat_{term.var_name}'
-        var_obj = f'_var_{term.var_name}'
-        idx_v   = f'_idx_{term.var_name}'
-        suffix  = ci.pyomo_name
+        df_var = f'df_{term.var_name}'
+        lhs_var = f'lhs_{ci.pyomo_name}'
 
         if term.param_name:
             pi = self.t.params[term.param_name]
-            param_s   = f's_{pi.pyomo_name.lower()}'
-            param_col = pi.pyomo_name.lower()
-            coo = f'_coo_{suffix}'
-            param_keys = []
-            for s in pi.index_sets:
-                param_keys.extend(self.r.names_for(s))
-            if len(param_keys) == 1:
-                self._emit(f"{coo} = {flat_v}.assign(_val={flat_v}['{param_keys[0]}'].map({param_s}))")
-            else:
-                on_repr = '[' + ', '.join(f"'{k}'" for k in param_keys) + ']'
-                self._emit(f"{coo} = pd.merge({flat_v}, {param_s}.reset_index(), on={on_repr})")
-                self._emit(f"{coo} = {coo}.rename(columns={{'{param_col}': '_val'}})")
-            val_repr = f"{coo}['_val'].values"
-            col_repr = f"{coo}['_col'].values"
-            n_expr   = f'len({coo})'
+            # Attach param as column
+            self._emit(f"{df_var}['_{pi.pyomo_name}'] = pd.Series(data['{pi.data_key}'])")
+            self._emit(
+                f"{lhs_var} = ({df_var}['_{pi.pyomo_name}'] * {df_var}['{term.var_name}']).sum()"
+            )
         else:
-            val_repr = f'np.ones(len({flat_v}))'
-            col_repr = f"{flat_v}['_col'].values"
-            n_expr   = f'len({flat_v})'
+            self._emit(f"{lhs_var} = {df_var}['{term.var_name}'].sum()")
 
-        self._emit(
-            f"_A_{suffix} = scipy.sparse.csr_matrix("
-            f"({val_repr}, (np.zeros({n_expr}, dtype=int), {col_repr})), "
-            f"shape=(1, len({idx_v})))"
-        )
         rhs_repr = self._rhs_repr(ci)
-        sense = _gurobi_sense(ci.op)
-        self._emit(f"m.addMConstr(_A_{suffix}, {var_obj}, {sense}, np.array([{rhs_repr}]), name='{ci.pyomo_name}')")
+        op_str = _py_op_str(ci.op)
+        self._emit(f"m.addLConstr({lhs_var} {op_str} {rhs_repr}, name='{ci.pyomo_name}')")
 
     # ------------------------------------------------------------------
     def _gen_P3(self, ci: ConstrInfo):
+        # flow_out - flow_in == rhs
+        # Two SumTermInfo in lhs_terms: [flow_out_term, flow_in_term]
         assert len(ci.lhs_terms) == 2
         out_term, in_term = ci.lhs_terms[0], ci.lhs_terms[1]
-        vi = self.t.vars[out_term.var_name]
-        flat_v  = f'_flat_{out_term.var_name}'
-        var_obj = f'_var_{out_term.var_name}'
-        idx_v   = f'_idx_{out_term.var_name}'
-        suffix  = ci.pyomo_name
+        df_var = f'df_{out_term.var_name}'
 
+        # For flow_out: groupby the fixed dims (rule_args that are NOT the loop var)
+        # loop_var for out_term is e.g. 'j' (the destination)
+        # loop_var for in_term is e.g. 'i' (the source)
+        # All var index names:
+        vi = self.t.vars[out_term.var_name]
         all_names = self.r.all_names_for_var(vi)
+
+        # Determine constraint index names (what we groupby to)
         constr_names = []
         for s in ci.index_sets:
             constr_names.extend(self.r.names_for(s))
 
+        # The loop vars appear in the variable's index — find which columns they map to
         out_loop = out_term.loop_var if isinstance(out_term.loop_var, str) else out_term.loop_var[0]
-        in_loop  = in_term.loop_var  if isinstance(in_term.loop_var,  str) else in_term.loop_var[0]
+        in_loop = in_term.loop_var if isinstance(in_term.loop_var, str) else in_term.loop_var[0]
+
+        # For flow_out: var is indexed as (source, dest, commodity)
+        # The loop var is 'j' (dest) — we sum over it, keeping (source, commodity)
+        # But the constraint uses 'node' for source — need to rename
+        # We detect which rule_arg corresponds to source by looking at what's NOT the loop var
+
+        # Build groupby keys for out: all var index names EXCEPT out_loop
         out_keys = [n for n in all_names if n != out_loop]
-        in_keys  = [n for n in all_names if n != in_loop]
+        in_keys = [n for n in all_names if n != in_loop]
 
-        # Build constraint ordering from RHS param
-        constr_df, n_repr, rhs_s = self._emit_constr_rows_df(ci, suffix)
+        out_keys_repr = '[' + ', '.join(f"'{k}'" for k in out_keys) + ']'
+        in_keys_repr = '[' + ', '.join(f"'{k}'" for k in in_keys) + ']'
 
-        # Forward arcs: variable (out_keys match constr_names)
+        out_var = f'flow_out_{ci.pyomo_name}'
+        in_var = f'flow_in_{ci.pyomo_name}'
+        lhs_var = f'lhs_{ci.pyomo_name}'
+
+        self._emit(f"{out_var} = {df_var}.groupby({out_keys_repr})['{out_term.var_name}'].sum()")
+        self._emit(f"{in_var} = {df_var}.groupby({in_keys_repr})['{in_term.var_name}'].sum()")
+
+        # Rename so both series share the same index names = constr_names
+        # out_keys may differ from constr_names if variable index used different names
         rename_out = {k: c for k, c in zip(out_keys, constr_names) if k != c}
-        rename_in  = {k: c for k, c in zip(in_keys,  constr_names) if k != c}
-        fwd = f'_fwd_{suffix}'
-        bwd = f'_bwd_{suffix}'
-
+        rename_in = {k: c for k, c in zip(in_keys, constr_names) if k != c}
         if rename_out:
-            inv_out = '{' + ', '.join(f"'{v}': '{k}'" for k, v in rename_out.items()) + '}'
-            fwd_constr = f'_constr_fwd_{suffix}'
-            self._emit(f"{fwd_constr} = {constr_df}.rename(columns={inv_out})")
-            ok = '[' + ', '.join(f"'{k}'" for k in out_keys) + ']'
-            self._emit(f"{fwd} = pd.merge({flat_v}, {fwd_constr}, on={ok})[['_col', '_row']]")
-        else:
-            ok = '[' + ', '.join(f"'{k}'" for k in out_keys) + ']'
-            self._emit(f"{fwd} = pd.merge({flat_v}, {constr_df}, on={ok})[['_col', '_row']]")
-
+            self._emit(f"{out_var} = {out_var}.rename_axis(index={rename_out})")
         if rename_in:
-            inv_in = '{' + ', '.join(f"'{v}': '{k}'" for k, v in rename_in.items()) + '}'
-            bwd_constr = f'_constr_bwd_{suffix}'
-            self._emit(f"{bwd_constr} = {constr_df}.rename(columns={inv_in})")
-            ik = '[' + ', '.join(f"'{k}'" for k in in_keys) + ']'
-            self._emit(f"{bwd} = pd.merge({flat_v}, {bwd_constr}, on={ik})[['_col', '_row']]")
-        else:
-            ik = '[' + ', '.join(f"'{k}'" for k in in_keys) + ']'
-            self._emit(f"{bwd} = pd.merge({flat_v}, {constr_df}, on={ik})[['_col', '_row']]")
+            self._emit(f"{in_var} = {in_var}.rename_axis(index={rename_in})")
 
-        coo = f'_coo_{suffix}'
-        self._emit(f"{coo} = pd.concat([{fwd}.assign(_val=1.0), {bwd}.assign(_val=-1.0)], ignore_index=True)")
-        self._emit(
-            f"_A_{suffix} = scipy.sparse.csr_matrix("
-            f"({coo}['_val'].values, ({coo}['_row'].values, {coo}['_col'].values)), "
-            f"shape=({n_repr}, len({idx_v})))"
-        )
-        b = self._b_repr_from_constr(ci, suffix, n_repr, rhs_s)
+        self._emit(f"{lhs_var} = {out_var}.sub({in_var}, fill_value=0)")
+
+        rhs_repr = self._rhs_repr(ci)
         sense = _gurobi_sense(ci.op)
-        self._emit(f"m._mconstr['{ci.pyomo_name}'] = m.addMConstr(_A_{suffix}, {var_obj}, {sense}, {b}, name='{ci.pyomo_name}')")
-        if rhs_s:
-            self._emit(f"m._rhs_ord['{ci.pyomo_name}'] = {rhs_s}.index")
-
-    # ------------------------------------------------------------------
-    def _emit_indexed_relation_mapping(self, term: SumTermInfo, ci: ConstrInfo, suffix: str):
-        """Emit the relation-mapping DataFrame + merged flat-variable DataFrame.
-
-        Shared by _gen_P4_indexed_rhs and _gen_P5.  Returns:
-          (lagged_df, full_outer_names, map_outer_names, inner_col_names)
-        """
-        vi = self.t.vars[term.var_name]
-        flat_v = f'_flat_{term.var_name}'
-        si = self.t.sets.get(term.iter_set)
-        data_key = si.data_key if si else term.iter_set
-
-        full_outer_names = []
-        for s in ci.index_sets:
-            full_outer_names.extend(self.r.names_for(s))
-
-        parent_set_name = si.index_set if si else None
-        map_outer_names = self.r.names_for(parent_set_name) if parent_set_name else full_outer_names
-
-        var_index_names  = self.r.all_names_for_var(vi)
-        subscript_args   = term.var_subscript_args
-        loop_vars_flat   = term.loop_var if isinstance(term.loop_var, list) else [term.loop_var]
-
-        inner_registry, inner_loop_vars = [], []
-        for i, arg in enumerate(subscript_args):
-            if arg not in ci.rule_args:
-                inner_registry.append(var_index_names[i] if i < len(var_index_names) else arg)
-                lv_idx = loop_vars_flat.index(arg) if arg in loop_vars_flat else len(inner_registry) - 1
-                inner_loop_vars.append(loop_vars_flat[lv_idx] if lv_idx < len(loop_vars_flat) else arg)
-
-        inner_col_names, rename_map = [], {}
-        for reg, lv in zip(inner_registry, inner_loop_vars):
-            inner_col_names.append(lv)
-            if reg != lv:
-                rename_map[reg] = lv
-
-        # Build mapping DataFrame
-        map_df = f'_map_{suffix}'
-        all_lv = loop_vars_flat
-        map_cols = map_outer_names + all_lv
-        outer_v = ('(' + ', '.join(map_outer_names) + ')' if len(map_outer_names) > 1
-                   else map_outer_names[0])
-        inner_v = ('(' + ', '.join(all_lv) + ')' if len(all_lv) > 1 else all_lv[0])
-        row_tup = '(' + ', '.join(map_outer_names + all_lv) + ')'
-        cols_repr = '[' + ', '.join(f"'{c}'" for c in map_cols) + ']'
-        self._emit(
-            f"_mapping_{suffix} = [{row_tup} for {outer_v}, _inner "
-            f"in data['{data_key}'].items() for {inner_v} in _inner]"
-        )
-        self._emit(f"{map_df} = pd.DataFrame(_mapping_{suffix}, columns={cols_repr})")
-
-        # Flat variable (possibly renamed)
-        reset_df = f'_reset_{suffix}'
-        all_var_post = [rename_map.get(n, n) for n in var_index_names]
-        if rename_map:
-            rr = '{' + ', '.join(f"'{k}': '{v}'" for k, v in rename_map.items()) + '}'
-            self._emit(f"{reset_df} = {flat_v}.rename(columns={rr})")
-        else:
-            reset_df = flat_v  # reuse directly
-
-        # Merge
-        extra_on = [n for n in map_outer_names if n in all_var_post]
-        merge_on = inner_col_names + extra_on
-        on_repr = (f"'{merge_on[0]}'" if len(merge_on) == 1
-                   else '[' + ', '.join(f"'{c}'" for c in merge_on) + ']')
-        lagged_df = f'_lagged_{suffix}'
-        self._emit(f"{lagged_df} = pd.merge({map_df}, {reset_df}, on={on_repr})")
-        return lagged_df, full_outer_names, map_outer_names, inner_col_names
+        self._emit(f"gppd.add_constrs(m, {lhs_var}, {sense}, {rhs_repr}, name='{ci.pyomo_name}')")
 
     # ------------------------------------------------------------------
     def _gen_P4(self, ci: ConstrInfo):
-        """Cross-dimensional merge — COO + addMConstr."""
+        """Cross-dimensional merge (component balance / machine capacity)."""
+        # Determine actual term list and whether sides are swapped
         if ci.lhs_is_direct_var:
+            # LHS is direct var, RHS is the sum → swap: lhs=sum, rhs=var
             terms = ci.rhs_terms
             rhs_is_var = True
         else:
@@ -1351,162 +1184,313 @@ class _CodeGen:
         term = terms[0]
         pi = self.t.params[term.param_name] if term.param_name else None
 
+        # When LHS is a direct var and RHS is an indexed-set sum (no param),
+        # use the P5-style flatten+merge+groupby pipeline.
         if rhs_is_var and term.iter_is_indexed and not pi:
             self._gen_P4_indexed_rhs(ci, term)
             return
 
         vi = self.t.vars[term.var_name]
-        flat_v  = f'_flat_{term.var_name}'
-        var_obj = f'_var_{term.var_name}'
-        idx_v   = f'_idx_{term.var_name}'
-        suffix  = ci.pyomo_name
+        df_var = f'df_{term.var_name}'
 
-        constr_names = []
-        for s in ci.index_sets:
-            constr_names.extend(self.r.names_for(s))
-        ck = '[' + ', '.join(f"'{k}'" for k in constr_names) + ']'
+        suffix = ci.pyomo_name
+        lhs_var = f'lhs_{suffix}'
 
-        # Build constraint row ordering
-        if rhs_is_var:
-            # No param RHS — build from constraint index
-            self._emit_constr_index(ci, f'_idx_{suffix}')
-            constr_df = f'_constr_{suffix}'
-            self._emit(f"{constr_df} = pd.DataFrame({{'_row': np.arange(len(_idx_{suffix}))}}, index=_idx_{suffix}).reset_index()")
-            n_repr = f'len(_idx_{suffix})'
-            rhs_s  = None
-        else:
-            constr_df, n_repr, rhs_s = self._emit_constr_rows_df(ci, suffix)
-
-        coo = f'_coo_{suffix}'
         if pi:
             param_s = f's_{pi.pyomo_name.lower()}'
-            param_col = pi.pyomo_name.lower()
+            # flat names
+            flat_param = f'df_{pi.pyomo_name.lower()}_flat_{suffix}'
+            flat_var = f'df_{term.var_name}_flat_{suffix}'
+            join_df = f'df_join_{suffix}'
+
+            # Join key: the loop var (shared dimension between param and var),
+            # restricted to the variable's actual index columns (handles tuple projection).
             var_index_names = self.r.all_names_for_var(vi)
             loop_v = term.loop_var
-            on_key = ([k for k in loop_v if k in var_index_names]
-                      if isinstance(loop_v, list)
-                      else ([loop_v] if loop_v in var_index_names else [loop_v]))
-            on_repr = (f"'{on_key[0]}'" if len(on_key) == 1
-                       else '[' + ', '.join(f"'{k}'" for k in on_key) + ']')
-            flat_p = f'_fp_{suffix}'
-            m1     = f'_m1_{suffix}'
-            self._emit(f"{flat_p} = {param_s}.reset_index()")
-            self._emit(f"{m1} = pd.merge({flat_p}, {flat_v}, on={on_repr})")
-            self._emit(f"{coo} = pd.merge({m1}, {constr_df}, on={ck})")
-            val_repr = f"{coo}['{param_col}'].values"
+            if isinstance(loop_v, list):
+                on_key = [k for k in loop_v if k in var_index_names]
+            else:
+                on_key = [loop_v] if loop_v in var_index_names else [loop_v]
+            if len(on_key) == 1:
+                on_repr = f"'{on_key[0]}'"
+            else:
+                on_repr = '[' + ', '.join(f"'{k}'" for k in on_key) + ']'
+
+            self._emit(f"{flat_param} = {param_s}.reset_index()")
+            self._emit(f"{flat_var} = {df_var}['{term.var_name}'].reset_index()")
+            self._emit(f"{join_df} = pd.merge({flat_param}, {flat_var}, on={on_repr})")
+
+            # groupby keys: constraint index names
+            constr_names = []
+            for s in ci.index_sets:
+                constr_names.extend(self.r.names_for(s))
+            keys_repr = '[' + ', '.join(f"{join_df}['{k}']" for k in constr_names) + ']'
+
+            # param column name: the Series name or first non-join column
+            param_col = pi.pyomo_name.lower()
+            self._emit(
+                f"{lhs_var} = ({join_df}['{param_col}'] * {join_df}['{term.var_name}']).groupby({keys_repr}).sum()"
+            )
         else:
-            self._emit(f"{coo} = pd.merge({flat_v}, {constr_df}, on={ck})")
-            val_repr = f'np.ones(len({coo}))'
+            # No param — pure sum over indexed set (non-indexed case)
+            constr_names = []
+            for s in ci.index_sets:
+                constr_names.extend(self.r.names_for(s))
+            keys_repr = '[' + ', '.join(f"'{k}'" for k in constr_names) + ']'
+            self._emit(f"{lhs_var} = {df_var}.groupby({keys_repr})['{term.var_name}'].sum()")
 
-        self._emit(
-            f"_A_sum_{suffix} = scipy.sparse.csr_matrix("
-            f"({val_repr}, ({coo}['_row'].values, {coo}['_col'].values)), "
-            f"shape=({n_repr}, len({idx_v})))"
-        )
-
+        # Now determine RHS representation
         if rhs_is_var:
-            # Constraint: sum(...) == direct_var  →  A_sum @ var_sum - I @ direct_var = 0
-            lhs_v  = ci.lhs_direct_var
-            flat_d = f'_flat_{lhs_v}'
-            var_d  = f'_var_{lhs_v}'
-            idx_d  = f'_idx_{lhs_v}'
-            dc_df  = f'_dc_{suffix}'
-            self._emit(f"{dc_df} = pd.merge({constr_df}, {flat_d}, on={ck})")
-            self._emit(
-                f"_A_neg_{suffix} = scipy.sparse.csr_matrix("
-                f"(-np.ones(len({dc_df})), ({dc_df}['_row'].values, {dc_df}['_col'].values)), "
-                f"shape=({n_repr}, len({idx_d})))"
-            )
-            op_str = _py_op_str(ci.op)
-            self._emit(
-                f"m._mconstr['{ci.pyomo_name}'] = m.addConstr("
-                f"(_A_sum_{suffix} @ {var_obj} + _A_neg_{suffix} @ {var_d}) "
-                f"{op_str} np.zeros({n_repr}), name='{ci.pyomo_name}')"
-            )
-        else:
-            b = self._b_repr_from_constr(ci, suffix, n_repr, rhs_s)
+            # RHS is the direct var variable
+            rhs_df = f'df_{ci.lhs_direct_var}'
+            rhs_repr = f"{rhs_df}['{ci.lhs_direct_var}']"
             sense = _gurobi_sense(ci.op)
-            self._emit(
-                f"m._mconstr['{ci.pyomo_name}'] = m.addMConstr("
-                f"_A_sum_{suffix}, {var_obj}, {sense}, {b}, name='{ci.pyomo_name}')"
-            )
-            if rhs_s:
-                self._emit(f"m._rhs_ord['{ci.pyomo_name}'] = {rhs_s}.index")
+            self._emit(f"gppd.add_constrs(m, {rhs_repr}, {sense}, {lhs_var}, name='{ci.pyomo_name}')")
+        else:
+            # RHS is a param — check if lower-dim (needs reindex)
+            rhs_repr = self._rhs_repr(ci)
+            rhs_pi = self._rhs_param(ci)
+            if rhs_pi and rhs_pi.index_sets:
+                constr_names = []
+                for s in ci.index_sets:
+                    constr_names.extend(self.r.names_for(s))
+                rhs_names = []
+                for s in rhs_pi.index_sets:
+                    rhs_names.extend(self.r.names_for(s))
+                if len(rhs_names) < len(constr_names):
+                    level_name = rhs_names[0]
+                    aligned_var = f's_{rhs_pi.pyomo_name.lower()}_aligned_{suffix}'
+                    self._emit(
+                        f"{aligned_var} = {rhs_repr}.reindex({lhs_var}.index, level='{level_name}')"
+                    )
+                    rhs_repr = aligned_var
+            sense = _gurobi_sense(ci.op)
+            self._emit(f"gppd.add_constrs(m, {lhs_var}, {sense}, {rhs_repr}, name='{ci.pyomo_name}')")
 
     # ------------------------------------------------------------------
     def _gen_P4_indexed_rhs(self, ci: ConstrInfo, term: SumTermInfo):
-        """var == sum(y[...] for ... in Rel[...]) — COO + addMConstr."""
+        """Handle var == sum(y[...] for ... in Rel[...]) using P5-like pipeline.
+
+        Called when LHS is a direct variable and RHS is a sum over an indexed
+        relation set with no param weight — same flatten+merge+groupby as P5
+        but the constraint is emitted with the direct var on the LHS.
+        """
+        vi = self.t.vars[term.var_name]
+        df_var = f'df_{term.var_name}'
+        si = self.t.sets.get(term.iter_set)
+        data_key = si.data_key if si else term.iter_set
         suffix = ci.pyomo_name
-        vi     = self.t.vars[term.var_name]
-        idx_v  = f'_idx_{term.var_name}'
-        var_obj = f'_var_{term.var_name}'
 
-        lagged_df, full_outer, _, _ = self._emit_indexed_relation_mapping(term, ci, suffix)
+        # Outer names (constraint index)
+        full_outer_names = []
+        for s in ci.index_sets:
+            full_outer_names.extend(self.r.names_for(s))
 
-        # Build constraint ordering from constraint index
-        self._emit_constr_index(ci, f'_idx_{suffix}')
-        constr_df = f'_constr_{suffix}'
-        self._emit(
-            f"{constr_df} = pd.DataFrame({{'_row': np.arange(len(_idx_{suffix}))}}, "
-            f"index=_idx_{suffix}).reset_index()"
-        )
-        n_repr = f'len(_idx_{suffix})'
+        # Parent set of the relation (what the outer key indexes)
+        parent_set_name = si.index_set if si else None
+        if parent_set_name:
+            map_outer_names = self.r.names_for(parent_set_name)
+        else:
+            map_outer_names = full_outer_names
 
-        ok = '[' + ', '.join(f"'{k}'" for k in full_outer) + ']'
-        coo = f'_coo_{suffix}'
-        self._emit(f"{coo} = pd.merge({lagged_df}, {constr_df}, on={ok})[['_col', '_row']]")
+        var_index_names = self.r.all_names_for_var(vi)
+        subscript_args = term.var_subscript_args
+        loop_vars_flat = term.loop_var if isinstance(term.loop_var, list) else [term.loop_var]
 
-        self._emit(
-            f"_A_rhs_{suffix} = scipy.sparse.csr_matrix("
-            f"(np.ones(len({coo})), ({coo}['_row'].values, {coo}['_col'].values)), "
-            f"shape=({n_repr}, len({idx_v})))"
-        )
+        # Inner col names (from subscript args not in rule args, mapped to registry names)
+        inner_registry = []
+        inner_loop_vars = []
+        for i, arg in enumerate(subscript_args):
+            if arg not in ci.rule_args:
+                inner_registry.append(var_index_names[i] if i < len(var_index_names) else arg)
+                lv_idx = loop_vars_flat.index(arg) if arg in loop_vars_flat else len(inner_registry) - 1
+                inner_loop_vars.append(loop_vars_flat[lv_idx] if lv_idx < len(loop_vars_flat) else arg)
 
-        # Negative-identity block for the LHS direct variable
-        lhs_v  = ci.lhs_direct_var
-        flat_d = f'_flat_{lhs_v}'
-        var_d  = f'_var_{lhs_v}'
-        idx_d  = f'_idx_{lhs_v}'
-        ck     = '[' + ', '.join(f"'{k}'" for k in full_outer) + ']'
-        dc_df  = f'_dc_{suffix}'
-        self._emit(f"{dc_df} = pd.merge({constr_df}, {flat_d}, on={ck})")
-        self._emit(
-            f"_A_neg_{suffix} = scipy.sparse.csr_matrix("
-            f"(-np.ones(len({dc_df})), ({dc_df}['_row'].values, {dc_df}['_col'].values)), "
-            f"shape=({n_repr}, len({idx_d})))"
-        )
-        op_str = _py_op_str(ci.op)
-        self._emit(
-            f"m._mconstr['{ci.pyomo_name}'] = m.addConstr("
-            f"(_A_rhs_{suffix} @ {var_obj} + _A_neg_{suffix} @ {var_d}) "
-            f"{op_str} np.zeros({n_repr}), name='{ci.pyomo_name}')"
-        )
+        inner_col_names = []
+        rename_map = {}
+        for reg, lv in zip(inner_registry, inner_loop_vars):
+            inner_col_names.append(lv)
+            if reg != lv:
+                rename_map[reg] = lv
+
+        # Build mapping DataFrame using all loop var fields (handles projection)
+        map_df = f'df_map_{suffix}'
+        all_loop_var_names = loop_vars_flat
+        map_col_names = map_outer_names + all_loop_var_names
+
+        if len(map_outer_names) == 1:
+            outer_var = map_outer_names[0]
+        else:
+            outer_var = '(' + ', '.join(map_outer_names) + ')'
+
+        if len(all_loop_var_names) == 1:
+            inner_var = all_loop_var_names[0]
+        else:
+            inner_var = '(' + ', '.join(all_loop_var_names) + ')'
+
+        row_parts = map_outer_names + all_loop_var_names
+        row_tuple = '(' + ', '.join(row_parts) + ')'
+        cols_repr = '[' + ', '.join(f"'{c}'" for c in map_col_names) + ']'
+
+        self._emit(f"_mapping_{suffix} = [{row_tuple} for {outer_var}, _inner in data['{data_key}'].items() for {inner_var} in _inner]")
+        self._emit(f"{map_df} = pd.DataFrame(_mapping_{suffix}, columns={cols_repr})")
+
+        # Flatten variable; rename conflicting index columns
+        reset_df = f'df_reset_{suffix}'
+        if rename_map:
+            rename_repr = '{' + ', '.join(f"'{k}': '{v}'" for k, v in rename_map.items()) + '}'
+            self._emit(f"{reset_df} = {df_var}['{term.var_name}'].reset_index().rename(columns={rename_repr})")
+        else:
+            self._emit(f"{reset_df} = {df_var}['{term.var_name}'].reset_index()")
+
+        # Merge on inner col names plus any outer index cols also in the variable
+        lagged_df = f'df_lagged_{suffix}'
+        all_var_names_post_rename = [rename_map.get(n, n) for n in var_index_names]
+        extra_on = [n for n in map_outer_names if n in all_var_names_post_rename]
+        merge_on = inner_col_names + extra_on
+        if len(merge_on) == 1:
+            on_repr = f"'{merge_on[0]}'"
+        else:
+            on_repr = '[' + ', '.join(f"'{c}'" for c in merge_on) + ']'
+        self._emit(f"{lagged_df} = pd.merge({map_df}, {reset_df}, on={on_repr})")
+
+        # Groupby outer names, sum
+        rhs_sum_var = f'rhs_{suffix}'
+        keys_repr = '[' + ', '.join(f"'{k}'" for k in full_outer_names) + ']'
+        self._emit(f"{rhs_sum_var} = {lagged_df}.groupby({keys_repr})['{term.var_name}'].sum()")
+
+        # Reindex both LHS selection and RHS against the constraint's declared index —
+        # not the variable's full domain — so that proper-subset constraint indices
+        # (sparse or Cartesian) produce exactly the right number of constraints.
+        lhs_df = f'df_{ci.lhs_direct_var}'
+        constr_idx = f'_idx_{suffix}'
+        self._emit_constr_index(ci, constr_idx)
+        self._emit(f"{rhs_sum_var} = {rhs_sum_var}.reindex({constr_idx}, fill_value=0.0)")
+
+        sense = _gurobi_sense(ci.op)
+        self._emit(f"gppd.add_constrs(m, {lhs_df}['{ci.lhs_direct_var}'].loc[{constr_idx}], {sense}, {rhs_sum_var}, name='{ci.pyomo_name}')")
 
     # ------------------------------------------------------------------
     def _gen_P5(self, ci: ConstrInfo):
-        """Indexed-relation constraint — COO + addMConstr."""
+        """Universal adjacency / indexed-relation engine.
+
+        Works for any ∑_{j ∈ Relation[i]} x[...j...] pattern by:
+          1. Flattening the indexed set dict into a relation DataFrame using
+             registry-derived column names (not loop-var names).
+          2. Renaming variable index columns only when a name conflict forces it.
+          3. Reindexing the grouped result against the constraint's full index.
+        """
         term = ci.lhs_terms[0]
-        var_obj = f'_var_{term.var_name}'
-        idx_v   = f'_idx_{term.var_name}'
-        suffix  = ci.pyomo_name
+        vi = self.t.vars[term.var_name]
+        df_var = f'df_{term.var_name}'
+        si = self.t.sets.get(term.iter_set)
+        data_key = si.data_key if si else term.iter_set
+        suffix = ci.pyomo_name
 
-        lagged_df, full_outer, _, _ = self._emit_indexed_relation_mapping(term, ci, suffix)
+        # --- 1. Outer names ---
+        # Full constraint outer names (used for groupby and reindex)
+        full_outer_names = []
+        for s in ci.index_sets:
+            full_outer_names.extend(self.r.names_for(s))
 
-        constr_df, n_repr, rhs_s = self._emit_constr_rows_df(ci, suffix)
+        # Mapping outer names = registry names of the iter_set's parent set
+        # (the set that indexes the relation, e.g. m.T indexes m.ValidStarts)
+        parent_set_name = si.index_set if si else None
+        if parent_set_name:
+            map_outer_names = self.r.names_for(parent_set_name)
+        else:
+            map_outer_names = full_outer_names
 
-        ok = '[' + ', '.join(f"'{k}'" for k in full_outer) + ']'
-        coo = f'_coo_{suffix}'
-        self._emit(f"{coo} = pd.merge({lagged_df}, {constr_df}, on={ok})")
+        # --- 2. Inner names (registry-derived, with conflict resolution) ---
+        var_index_names = self.r.all_names_for_var(vi)
+        subscript_args = term.var_subscript_args   # e.g. ['s', 'tp'] or ['fac'] or ['orig', 'dest']
+        loop_vars_flat = term.loop_var if isinstance(term.loop_var, list) else [term.loop_var]
+
+        # Inner positions: subscript_args positions NOT in rule_args
+        inner_registry = []   # registry name at each inner position
+        inner_loop_vars = []  # corresponding loop var name
+        for i, arg in enumerate(subscript_args):
+            if arg not in ci.rule_args:
+                inner_registry.append(var_index_names[i] if i < len(var_index_names) else arg)
+                # find which loop var this is
+                lv_idx = loop_vars_flat.index(arg) if arg in loop_vars_flat else len(inner_registry) - 1
+                inner_loop_vars.append(loop_vars_flat[lv_idx] if lv_idx < len(loop_vars_flat) else arg)
+
+        # Use loop var names as the column names in the mapping DataFrame so that:
+        # 1. The comprehension correctly unpacks ALL loop var fields (projection support).
+        # 2. The variable reset_index is renamed to match these names (merge alignment).
+        # rename_map covers BOTH outer-name conflicts AND cases where registry name ≠ loop var name.
+        inner_col_names = []
+        rename_map = {}  # var's registry col → loop var col name to use after reset_index
+        for reg, lv in zip(inner_registry, inner_loop_vars):
+            inner_col_names.append(lv)       # always use loop var name as the column
+            if reg != lv:
+                rename_map[reg] = lv          # rename variable index col to match
+
+        # --- 3. Build relation mapping DataFrame ---
+        # Use ALL loop var fields for comprehension unpacking (handles projection:
+        # e.g., loop (f,w,s) but var subscript [f,s] — must unpack all three).
+        map_df = f'df_map_{suffix}'
+        all_loop_var_names = loop_vars_flat  # full tuple, may be superset of inner_col_names
+        map_col_names = map_outer_names + all_loop_var_names
+
+        # Outer iteration variable(s) in the comprehension
+        if len(map_outer_names) == 1:
+            outer_var = map_outer_names[0]
+        else:
+            outer_var = '(' + ', '.join(map_outer_names) + ')'
+
+        # Inner iteration variable(s) — unpack all loop var fields
+        if len(all_loop_var_names) == 1:
+            inner_var = all_loop_var_names[0]
+        else:
+            inner_var = '(' + ', '.join(all_loop_var_names) + ')'
+
+        # Full row tuple in the comprehension
+        row_parts = map_outer_names + all_loop_var_names
+        row_tuple = '(' + ', '.join(row_parts) + ')'
+
+        cols_repr = '[' + ', '.join(f"'{c}'" for c in map_col_names) + ']'
         self._emit(
-            f"_A_{suffix} = scipy.sparse.csr_matrix("
-            f"(np.ones(len({coo})), ({coo}['_row'].values, {coo}['_col'].values)), "
-            f"shape=({n_repr}, len({idx_v})))"
+            f"_mapping_{suffix} = [{row_tuple} for {outer_var}, _inner in data['{data_key}'].items() for {inner_var} in _inner]"
         )
-        b = self._b_repr_from_constr(ci, suffix, n_repr, rhs_s)
+        self._emit(f"{map_df} = pd.DataFrame(_mapping_{suffix}, columns={cols_repr})")
+
+        # --- 4. Flatten variable; rename conflicting index columns ---
+        reset_df = f'df_reset_{suffix}'
+        if rename_map:
+            rename_repr = '{' + ', '.join(f"'{k}': '{v}'" for k, v in rename_map.items()) + '}'
+            self._emit(f"{reset_df} = {df_var}['{term.var_name}'].reset_index().rename(columns={rename_repr})")
+        else:
+            self._emit(f"{reset_df} = {df_var}['{term.var_name}'].reset_index()")
+
+        # --- 5. Merge on inner column names (plus any outer-index columns that
+        # also appear in the variable's reset_index, to avoid pandas duplicate-column
+        # suffixes when the variable subscript contains the constraint's outer index,
+        # e.g. x[i, j] iterated over SubSet[i]). ---
+        lagged_df = f'df_lagged_{suffix}'
+        all_var_names_post_rename = [rename_map.get(n, n) for n in var_index_names]
+        extra_on = [n for n in map_outer_names if n in all_var_names_post_rename]
+        merge_on = inner_col_names + extra_on
+        if len(merge_on) == 1:
+            on_repr = f"'{merge_on[0]}'"
+        else:
+            on_repr = '[' + ', '.join(f"'{c}'" for c in merge_on) + ']'
+        self._emit(f"{lagged_df} = pd.merge({map_df}, {reset_df}, on={on_repr})")
+
+        # --- 6. Groupby full outer names, sum ---
+        lhs_var = f'lhs_{suffix}'
+        keys_repr = '[' + ', '.join(f"'{k}'" for k in full_outer_names) + ']'
+        self._emit(f"{lhs_var} = {lagged_df}.groupby({keys_repr})['{term.var_name}'].sum()")
+
+        # --- 7. Reindex against constraint's full index (handles missing outer values) ---
+        constr_idx = f'_idx_{suffix}'
+        self._emit_constr_index(ci, constr_idx)
+        self._emit(f"{lhs_var} = {lhs_var}.reindex({constr_idx}, fill_value=0.0)")
+
+        rhs_repr = self._rhs_repr(ci)
         sense = _gurobi_sense(ci.op)
-        self._emit(f"m._mconstr['{ci.pyomo_name}'] = m.addMConstr(_A_{suffix}, {var_obj}, {sense}, {b}, name='{ci.pyomo_name}')")
-        if rhs_s:
-            self._emit(f"m._rhs_ord['{ci.pyomo_name}'] = {rhs_s}.index")
+        self._emit(f"gppd.add_constrs(m, {lhs_var}, {sense}, {rhs_repr}, name='{ci.pyomo_name}')")
 
     def _emit_constr_index(self, ci: ConstrInfo, idx_var: str):
         """Emit construction of the constraint's full index for reindexing."""
@@ -1533,166 +1517,132 @@ class _CodeGen:
 
     # ------------------------------------------------------------------
     def _gen_P_inter_add(self, ci: ConstrInfo):
-        """sum(x[...]) + sum(y[...]) — per-term COO blocks, hstack, addMConstr."""
+        """sum(x[...]) + sum(y[...]) — combine separate groupby results with .add()."""
         groupby_keys = []
         for s in ci.index_sets:
             groupby_keys.extend(self.r.names_for(s))
-        suffix = ci.pyomo_name
-        ck = '[' + ', '.join(f"'{k}'" for k in groupby_keys) + ']'
+        keys_repr = '[' + ', '.join(f"'{k}'" for k in groupby_keys) + ']'
 
-        constr_df, n_repr, rhs_s = self._emit_constr_rows_df(ci, suffix)
-
-        a_blocks = []
-        var_list_parts = []
-        for i, term in enumerate(ci.lhs_terms):
-            flat_v  = f'_flat_{term.var_name}'
-            idx_v   = f'_idx_{term.var_name}'
-            var_obj = f'_var_{term.var_name}'
-            coo_i   = f'_coo_{suffix}_t{i}'
-
+        term_var_names = []
+        for idx, term in enumerate(ci.lhs_terms):
+            df_v = f'df_{term.var_name}'
+            lhs_i = f'lhs_{ci.pyomo_name}_t{idx}'
             if term.param_name:
                 pi = self.t.params[term.param_name]
-                param_s   = f's_{pi.pyomo_name.lower()}'
-                param_col = pi.pyomo_name.lower()
-                param_key = self.r.names_for(pi.index_sets[0])[0] if pi.index_sets else None
-                self._emit(f"{coo_i} = pd.merge({flat_v}, {constr_df}, on={ck})")
-                self._emit(f"{coo_i} = {coo_i}.assign(_val={coo_i}['{param_key}'].map({param_s}))")
-                val_repr = f"{coo_i}['_val'].values"
+                on_dim = self.r.names_for(pi.index_sets[0])[0] if pi.index_sets else None
+                joined = f'_df_{ci.pyomo_name}_w{idx}'
+                self._emit(f"{joined} = {df_v}.join(s_{pi.pyomo_name.lower()}, on='{on_dim}')")
+                self._emit(
+                    f"{lhs_i} = ({joined}['{pi.pyomo_name.lower()}'] * {joined}['{term.var_name}']).groupby({keys_repr}).sum()"
+                )
             else:
-                self._emit(f"{coo_i} = pd.merge({flat_v}, {constr_df}, on={ck})")
-                val_repr = f'np.ones(len({coo_i}))'
+                self._emit(f"{lhs_i} = {df_v}.groupby({keys_repr})['{term.var_name}'].sum()")
+            term_var_names.append(lhs_i)
 
-            a_block = f'_A_{suffix}_t{i}'
-            self._emit(
-                f"{a_block} = scipy.sparse.csr_matrix("
-                f"({val_repr}, ({coo_i}['_row'].values, {coo_i}['_col'].values)), "
-                f"shape=({n_repr}, len({idx_v})))"
-            )
-            a_blocks.append(a_block)
-            var_list_parts.append(f'list({var_obj})')
+        lhs_var = f'lhs_{ci.pyomo_name}'
+        # Chain .add(fill_value=0) across all terms
+        result = term_var_names[0]
+        for tv in term_var_names[1:]:
+            self._emit(f"{lhs_var} = {result}.add({tv}, fill_value=0)")
+            result = lhs_var
+        if len(term_var_names) == 1:
+            self._emit(f"{lhs_var} = {term_var_names[0]}")
 
-        b = self._b_repr_from_constr(ci, suffix, n_repr, rhs_s)
-        op_str = _py_op_str(ci.op)
-        # Build lhs as sum of A_block @ mvar terms (avoids list(MVar) incompatibility)
-        terms_iter = zip(a_blocks, [f'_var_{term.var_name}' for term in ci.lhs_terms])
-        lhs_expr = ' + '.join(f'{a} @ {v}' for a, v in terms_iter)
-        self._emit(f"m._mconstr['{ci.pyomo_name}'] = m.addConstr(({lhs_expr}) {op_str} {b}, name='{ci.pyomo_name}')")
-        if rhs_s:
-            self._emit(f"m._rhs_ord['{ci.pyomo_name}'] = {rhs_s}.index")
+        rhs_repr = self._rhs_repr(ci)
+        sense = _gurobi_sense(ci.op)
+        self._emit(f"gppd.add_constrs(m, {lhs_var}, {sense}, {rhs_repr}, name='{ci.pyomo_name}')")
 
     # ------------------------------------------------------------------
     def _gen_P_intra_add(self, ci: ConstrInfo):
-        """sum(c1*x + c2*y - z for ...) — per-subterm COO blocks, hstack, addMConstr."""
-        term0  = ci.lhs_terms[0]
-        intra  = term0.intra_terms   # [(var_name, param_name, subscript_args, sign), ...]
+        """General intra-sum linear combination: sum(c1*x + c2*y - z for ...) op rhs.
+        Works for any number of variables with any compatible index shapes by
+        flattening each term then iteratively merging on shared index columns."""
+        term = ci.lhs_terms[0]
+        intra = term.intra_terms   # [(var_name, param_name, subscript_args, sign), ...]
         suffix = ci.pyomo_name
 
         outer_names = []
         for s in ci.index_sets:
             outer_names.extend(self.r.names_for(s))
+        keys_repr = (f"'{outer_names[0]}'" if len(outer_names) == 1
+                     else '[' + ', '.join(f"'{k}'" for k in outer_names) + ']')
 
-        constr_df, n_repr, rhs_s = self._emit_constr_rows_df(ci, suffix)
-
-        # Step 1: rename _col → _col_t{i} in a copy of each variable's flat DataFrame
-        for i, (vname, _pname, _sargs, _sign) in enumerate(intra):
-            fi = f'_fi{i}_{suffix}'
-            self._emit(f"{fi} = _flat_{vname}.rename(columns={{'_col': '_col_t{i}'}})")
-
-        # Step 2: iteratively merge flat DataFrames on shared index columns
-        merged = f'_mi_{suffix}'
-        self._emit(f"{merged} = _fi0_{suffix}")
-        accumulated = set(self.r.all_names_for_var(self.t.vars[intra[0][0]]))
-        for i, (vname, _pname, _sargs, _sign) in enumerate(intra[1:], 1):
-            var_idx = set(self.r.all_names_for_var(self.t.vars[vname]))
-            common  = sorted(accumulated & var_idx)
-            if common:
-                on_repr = (f"'{common[0]}'" if len(common) == 1
-                           else '[' + ', '.join(f"'{c}'" for c in common) + ']')
-                self._emit(f"{merged} = pd.merge({merged}, _fi{i}_{suffix}, on={on_repr})")
-            else:
-                self._emit(f"{merged} = {merged}.merge(_fi{i}_{suffix}, how='cross')")
-            accumulated |= var_idx
-
-        # Step 2b: merge any param Series into the merged DataFrame
-        for i, (vname, pname, _sargs, _sign) in enumerate(intra):
+        # --- Step 1: flatten each variable (+ its param coefficient if present) ---
+        flat_infos = []
+        for i, (vname, pname, _sargs, sign) in enumerate(intra):
+            flat = f'_fi{i}_{suffix}'
+            vi = self.t.vars[vname]
+            idx_cols = set(self.r.all_names_for_var(vi))
+            self._emit(f"{flat} = df_{vname}['{vname}'].reset_index()")
             if pname:
                 pi = self.t.params[pname]
-                param_s   = f's_{pi.pyomo_name.lower()}'
-                param_col = pi.pyomo_name.lower()
-                pidx_names = []
-                for ps in pi.index_sets:
-                    pidx_names.extend(self.r.names_for(ps))
-                on_repr = (f"'{pidx_names[0]}'" if len(pidx_names) == 1
-                           else '[' + ', '.join(f"'{c}'" for c in pidx_names) + ']')
-                self._emit(
-                    f"{merged} = pd.merge({merged}, "
-                    f"{param_s}.reset_index().rename(columns={{'{param_col}': '_pv{i}'}}), "
-                    f"on={on_repr})"
-                )
+                param_idx_cols = []
+                for s in pi.index_sets:
+                    param_idx_cols.extend(self.r.names_for(s))
+                on_repr = (f"'{param_idx_cols[0]}'" if len(param_idx_cols) == 1
+                           else '[' + ', '.join(f"'{c}'" for c in param_idx_cols) + ']')
+                self._emit(f"{flat} = pd.merge({flat}, s_{pi.pyomo_name.lower()}.reset_index(), on={on_repr})")
+                idx_cols |= set(param_idx_cols)
+            flat_infos.append({'df': flat, 'var': vname, 'param': pname,
+                               'idx': idx_cols, 'sign': sign})
 
-        # Step 3: merge with constr_df to get _row
-        ck = '[' + ', '.join(f"'{k}'" for k in outer_names) + ']'
-        self._emit(f"{merged} = pd.merge({merged}, {constr_df}, on={ck})")
+        # --- Step 2: iteratively merge all flat DataFrames on shared index columns ---
+        merged = f'_mi_{suffix}'
+        self._emit(f"{merged} = {flat_infos[0]['df']}")
+        accumulated = flat_infos[0]['idx'].copy()
+        for info in flat_infos[1:]:
+            common = sorted(accumulated & info['idx'])
+            on_repr = (f"'{common[0]}'" if len(common) == 1
+                       else '[' + ', '.join(f"'{c}'" for c in common) + ']')
+            self._emit(f"{merged} = pd.merge({merged}, {info['df']}, on={on_repr})")
+            accumulated |= info['idx']
 
-        # Step 4: build A block and variable list per intra term
-        a_blocks      = []
-        var_list_parts = []
-        for i, (vname, pname, _sargs, sign) in enumerate(intra):
-            idx_v   = f'_idx_{vname}'
-            var_obj = f'_var_{vname}'
-            a_block = f'_A_{suffix}_t{i}'
+        # --- Step 3: build the linear combination expression string ---
+        expr_str = ''
+        for i, info in enumerate(flat_infos):
+            vname, pname, sign = info['var'], info['param'], info['sign']
             if pname:
-                val_repr = (f"-{merged}['_pv{i}'].values" if sign < 0
-                            else f"{merged}['_pv{i}'].values")
+                pi = self.t.params[pname]
+                term_str = f"{merged}['{pi.pyomo_name.lower()}'] * {merged}['{vname}']"
             else:
-                val_repr = f'np.full(len({merged}), {float(sign)})'
-            self._emit(
-                f"{a_block} = scipy.sparse.csr_matrix("
-                f"({val_repr}, ({merged}['_row'].values, {merged}['_col_t{i}'].values)), "
-                f"shape=({n_repr}, len({idx_v})))"
-            )
-            a_blocks.append(a_block)
-            var_list_parts.append(f'list({var_obj})')
+                term_str = f"{merged}['{vname}']"
+            if i == 0:
+                expr_str = f"-{term_str}" if sign < 0 else term_str
+            else:
+                expr_str += f" - {term_str}" if sign < 0 else f" + {term_str}"
 
-        b = self._b_repr_from_constr(ci, suffix, n_repr, rhs_s)
-        op_str = _py_op_str(ci.op)
-        # Build lhs as sum of A_block @ mvar (sign baked into A coefficients)
-        lhs_expr = ' + '.join(
-            f'_A_{suffix}_t{i} @ _var_{vname}'
-            for i, (vname, _pname, _sargs, _sign) in enumerate(intra)
-        )
-        self._emit(f"m._mconstr['{ci.pyomo_name}'] = m.addConstr(({lhs_expr}) {op_str} {b}, name='{ci.pyomo_name}')")
-        if rhs_s:
-            self._emit(f"m._rhs_ord['{ci.pyomo_name}'] = {rhs_s}.index")
+        # --- Step 4: groupby outer constraint index and sum ---
+        # After merge the table has a plain RangeIndex, so pass column references
+        # explicitly (not string names) to groupby.
+        lhs_var = f'lhs_{suffix}'
+        grp_parts = [f"{merged}['{k}']" for k in outer_names]
+        grp_repr = grp_parts[0] if len(grp_parts) == 1 else '[' + ', '.join(grp_parts) + ']'
+        self._emit(f"{lhs_var} = ({expr_str}).groupby({grp_repr}).sum()")
+
+        rhs_repr = self._rhs_repr(ci)
+        sense = _gurobi_sense(ci.op)
+        self._emit(f"gppd.add_constrs(m, {lhs_var}, {sense}, {rhs_repr}, name='{ci.pyomo_name}')")
 
     # ------------------------------------------------------------------
     def _gen_P6(self, ci: ConstrInfo):
-        """Direct var access — COO + addMConstr."""
+        """Direct var access — always restricted to the constraint's declared index.
+
+        Handles all three sub-cases uniformly:
+          • constraint index == variable domain  (most common — .loc is identity)
+          • constraint index is a proper subset  (whether or not declared with within=)
+          • constraint index is a sparse dimen=2 set  (from_tuples, not from_product)
+        """
         var_name = ci.lhs_direct_var
-        flat_v   = f'_flat_{var_name}'
-        var_obj  = f'_var_{var_name}'
-        idx_v    = f'_idx_{var_name}'
-        suffix   = ci.pyomo_name
+        df_var = f'df_{var_name}'
+        suffix = ci.pyomo_name
 
-        constr_names = []
-        for s in ci.index_sets:
-            constr_names.extend(self.r.names_for(s))
+        constr_idx = f'_idx_{suffix}'
+        self._emit_constr_index(ci, constr_idx)
+        lhs_repr = f"{df_var}['{var_name}'].loc[{constr_idx}]"
 
-        constr_df, n_repr, rhs_s = self._emit_constr_rows_df(ci, suffix)
-
-        ck = '[' + ', '.join(f"'{k}'" for k in constr_names) + ']'
-        coo = f'_coo_{suffix}'
-        self._emit(f"{coo} = pd.merge({constr_df}, {flat_v}, on={ck})")
-        self._emit(
-            f"_A_{suffix} = scipy.sparse.csr_matrix("
-            f"(np.ones(len({coo})), ({coo}['_row'].values, {coo}['_col'].values)), "
-            f"shape=({n_repr}, len({idx_v})))"
-        )
-        b = self._b_repr_from_constr(ci, suffix, n_repr, rhs_s)
+        rhs_repr = self._rhs_repr(ci)
         sense = _gurobi_sense(ci.op)
-        self._emit(f"m._mconstr['{ci.pyomo_name}'] = m.addMConstr(_A_{suffix}, {var_obj}, {sense}, {b}, name='{ci.pyomo_name}')")
-        if rhs_s:
-            self._emit(f"m._rhs_ord['{ci.pyomo_name}'] = {rhs_s}.index")
+        self._emit(f"gppd.add_constrs(m, {lhs_repr}, {sense}, {rhs_repr}, name='{ci.pyomo_name}')")
 
     # ------------------------------------------------------------------
     def _rhs_repr(self, ci: ConstrInfo) -> str:
@@ -1728,56 +1678,6 @@ class _CodeGen:
             if attr and attr in self.t.params:
                 return self.t.params[attr]
         return None
-
-    # ------------------------------------------------------------------
-    def _gen_update_function(self):
-        """Emit update_vectorized_model(m, new_data) after the main function."""
-        self._emit('', indent=0)
-        self._emit('def update_vectorized_model(m, new_data):', indent=0)
-        self._emit('import gurobipy as gp')
-        self._emit('import pandas as pd')
-        self._emit('import numpy as np')
-
-        # Re-initialise all params from new_data
-        for pname in self.t._param_order:
-            pi = self.t.params[pname]
-            var_name = f's_{pi.pyomo_name.lower()}'
-            col_name = pi.pyomo_name.lower()
-            if not pi.index_sets:
-                self._emit(f"{pi.pyomo_name.lower()} = new_data['{pi.data_key}']")
-            else:
-                names = []
-                for s in pi.index_sets:
-                    names.extend(self.r.names_for(s))
-                axis_repr = (f"'{names[0]}'" if len(names) == 1
-                             else '[' + ', '.join(f"'{n}'" for n in names) + ']')
-                self._emit(
-                    f"{var_name} = pd.Series(new_data['{pi.data_key}'], "
-                    f"name='{col_name}').rename_axis({axis_repr})"
-                )
-        if self.t.params:
-            self._emit()
-
-        # Update RHS for tracked constraints
-        for ci in self.t.constrs:
-            rhs_pi = self._rhs_param(ci)
-            if not rhs_pi or not rhs_pi.index_sets:
-                continue
-            rhs_s = f's_{rhs_pi.pyomo_name.lower()}'
-            self._emit(
-                f"if '{ci.pyomo_name}' in m._mconstr:"
-            )
-            self._emit(
-                f"    m._mconstr['{ci.pyomo_name}'].setAttr("
-                f"'RHS', {rhs_s}.reindex(m._rhs_ord['{ci.pyomo_name}']).values)"
-            )
-
-        # Update objective
-        if self.t.obj:
-            self._emit()
-            self._gen_objective(new_data=True)
-
-        self._emit('return m')
 
 
 # ---------------------------------------------------------------------------
@@ -1822,6 +1722,10 @@ def solve(func, data, silent: bool = True):
             values – dict {var_name: pd.Series(index → float)}
                      Empty dict if the model was infeasible / no solution found.
     """
+    import gurobipy as gp   # noqa: F401 — needed in exec'd namespace
+    import gurobipy_pandas as gppd  # noqa: F401
+    import pandas as pd     # noqa: F401
+
     raw_src = inspect.getsource(func)
     src = textwrap.dedent(raw_src)
     tree = ast.parse(src)
@@ -1832,11 +1736,11 @@ def solve(func, data, silent: bool = True):
     t.classify()
     registry = _IndexRegistry(t)
     registry.build()
-    code = _CodeGen(t, registry).generate()
+    code = _CodeGen(t, registry).generate(extended=True)
 
     ns = {}
-    exec(compile(code, '<translated>', 'exec'), ns)
-    model = ns['build_vectorized_model'](data)
+    exec(compile(code, '<translated-extended>', 'exec'), ns)
+    model, var_series = ns['build_vectorized_model'](data)
 
     if silent:
         model.setParam('OutputFlag', 0)
@@ -1845,7 +1749,7 @@ def solve(func, data, silent: bool = True):
     if model.SolCount == 0:
         return model, {}
 
-    values = model._get_values()
+    values = {name: series.apply(lambda v: v.X) for name, series in var_series.items()}
     return model, values
 
 
