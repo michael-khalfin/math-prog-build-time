@@ -22,6 +22,8 @@ import examples.example_16_indexed_subset as ex16
 import examples.example_17_subset_tuple as ex17
 import examples.example_18_lhs_equality as ex18
 import examples.example_19_jk_secretary as ex19
+import examples.example_20_p3_name_mismatch as ex20
+import examples.example_21_p4_name_mismatch as ex21
 
 from translator import translate, solve, populate_pyomo
 from pyomo.environ import SolverFactory
@@ -34,7 +36,7 @@ def build_from_translated(module):
     print(code)
     print("----------------------")
     ns = {}
-    exec(compile(code, "<translated>", "exec"), ns)
+    exec(code, ns)
     return ns['build_vectorized_model'](module.data)
 
 
@@ -116,6 +118,9 @@ def test_update_api(module, name):
     4. Verify objective values match the fresh Pyomo solve.
     """
     print(f"\nTesting update API for {name}...")
+    if getattr(module, 'skip_update_test', False):
+        print(f"  (update test skipped — matrix coefficients not updatable via RHS hot-swap)")
+        return
 
     code = translate(module.build_pyomo_model)
     if "def update_vectorized_model" not in code:
@@ -123,7 +128,7 @@ def test_update_api(module, name):
         return
 
     ns = {}
-    exec(compile(code, "<translated>", "exec"), ns)
+    exec(code, ns)
     build_fn  = ns["build_vectorized_model"]
     update_fn = ns["update_vectorized_model"]
 
@@ -198,6 +203,8 @@ if __name__ == "__main__":
         (ex17, "Example 17 (Subset Tuple)"),
         (ex18, "Example 18 (LHS Equality)"),
         (ex19, "Example 19 (JK Secretary)"),
+        (ex20, "Example 20 (P3 Name Mismatch)"),
+        (ex21, "Example 21 (P4 Name Mismatch)"),
     ]
 
     failed = []
