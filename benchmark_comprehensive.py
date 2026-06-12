@@ -1,15 +1,17 @@
 """
 Comprehensive build-time benchmark
 ===================================
-Compares three model-construction paths across three problem types.
+Compares four model-construction paths across three problem types.
 Sizes are chosen so Pyomo starts at ~1 minute and grows to ~15 minutes.
-Expected total wall-clock time: 1.5 – 2.5 hours.
+Expected total wall-clock time: 2 – 3 hours.
 
   ① Pyomo               — ConcreteModel + rule evaluation + gurobi_persistent
-  ② gurobipy-pandas     — translator-old.translate() → gppd.add_vars / add_constrs
-  ③ COO / MVar          — translator.translate()     → addMVar + addMConstr
+  ② Pyomo+Template      — ConcreteModel + TEMPLATIZE_* + LinearStandardFormCompiler
+                          + addMVar/addMConstr  (mirrors gurobi_direct_v2 internals)
+  ③ gurobipy-pandas     — translator-old.translate() → gppd.add_vars / add_constrs
+  ④ COO / MVar          — translator.translate()     → addMVar + addMConstr
 
-All three methods are derived from the same Pyomo build function via translate().
+All methods are derived from the same Pyomo model-building function.
 
 Output
 ------
@@ -26,6 +28,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+import operator
+
 import gurobipy as gp
 import numpy as np
 import matplotlib
@@ -34,6 +38,9 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 from pyomo.environ import SolverFactory
 import pyomo.environ as pyo
+from pyomo.repn.plugins.standard_form import LinearStandardFormCompiler
+from pyomo.core.base import constraint as _pyo_con_mod
+from pyomo.core.base import objective as _pyo_obj_mod
 
 import translator     as _new_tr   # COO + MVar
 import importlib.util
@@ -50,7 +57,8 @@ def _load_old_translator():
 
 _old_tr = _load_old_translator()
 
-PYOMO_TIMEOUT_MIN = 25.0   # skip remaining Pyomo sizes once one exceeds this
+PYOMO_TIMEOUT_MIN    = 25.0   # skip remaining Pyomo sizes once one exceeds this
+TEMPLATE_TIMEOUT_MIN = 10.0   # skip remaining Pyomo+Template sizes once one exceeds this
 
 
 # ===========================================================================
@@ -75,6 +83,44 @@ def _timed(fn: Callable, data: dict) -> tuple[object, float]:
     return result, time.perf_counter() - t0
 
 
+def _make_template_direct_builder(pyomo_model_fn: Callable) -> Callable:
+    """Mirrors what gurobi_direct_v2 does internally:
+      1. Flip TEMPLATIZE_* so Pyomo stores one shared template per constraint block
+         instead of N per-row expression trees.
+      2. Compile via LinearStandardFormCompiler (same call as GurobiDirect._create_solver_model).
+      3. Push the single sparse matrix to Gurobi via addMVar + addMConstr.
+    pyomo_model_fn must return a pyo.ConcreteModel (not a gurobipy Model).
+    """
+    def builder(data: dict):
+        saved_con = _pyo_con_mod.TEMPLATIZE_CONSTRAINTS
+        saved_obj = _pyo_obj_mod.TEMPLATIZE_OBJECTIVES
+        _pyo_con_mod.TEMPLATIZE_CONSTRAINTS = True
+        _pyo_obj_mod.TEMPLATIZE_OBJECTIVES = True
+        try:
+            m = pyomo_model_fn(data)
+        finally:
+            _pyo_con_mod.TEMPLATIZE_CONSTRAINTS = saved_con
+            _pyo_obj_mod.TEMPLATIZE_OBJECTIVES = saved_obj
+
+        repn = LinearStandardFormCompiler().write(m, mixed_form=True, set_sense=None)
+
+        inf, ninf = float('inf'), float('-inf')
+        bounds = list(map(operator.attrgetter('bounds'), repn.columns))
+        lb = [ninf if b[0] is None else b[0] for b in bounds]
+        ub = [inf  if b[1] is None else b[1] for b in bounds]
+        sense_type = list('=<>')   # sense codes: 0→'=', 1→'<', -1→'>'
+        sense = [sense_type[r[1]] for r in repn.rows]
+
+        gm = gp.Model()
+        gm.setParam("OutputFlag", 0)
+        x = gm.addMVar(len(repn.columns), lb=lb, ub=ub, name="x")
+        gm.addMConstr(repn.A, x, sense, repn.rhs)
+        gm.update()
+        return gm
+
+    return builder
+
+
 # ===========================================================================
 # PROBLEM A — Supply-Demand  (P1)
 # Variables:  x[I × J]         n_i * n_j
@@ -92,7 +138,7 @@ def gen_supply_demand(n_i: int, n_j: int, seed: int = 1) -> dict:
     }
 
 
-def sd_pyomo_build(data: dict):
+def sd_pyomo_model(data: dict) -> pyo.ConcreteModel:
     m = pyo.ConcreteModel()
     m.I      = pyo.Set(initialize=data["I"])
     m.J      = pyo.Set(initialize=data["J"])
@@ -107,7 +153,11 @@ def sd_pyomo_build(data: dict):
     def demand_rule(m, j):
         return sum(m.x[i, j] for i in m.I) >= m.Demand[j]
     m.demand_constr = pyo.Constraint(m.J, rule=demand_rule)
+    return m
 
+
+def sd_pyomo_build(data: dict):
+    m = sd_pyomo_model(data)
     opt = SolverFactory("gurobi_persistent")
     opt.set_instance(m)
     return opt._solver_model
@@ -171,7 +221,7 @@ def gen_network_flow(n_nodes: int, avg_degree: int, n_k: int, seed: int = 2) -> 
     }
 
 
-def nf_pyomo_build(data: dict):
+def nf_pyomo_model(data: dict) -> pyo.ConcreteModel:
     m = pyo.ConcreteModel()
     m.N       = pyo.Set(initialize=data["Nodes"])
     m.K       = pyo.Set(initialize=data["Commodities"])
@@ -191,7 +241,11 @@ def nf_pyomo_build(data: dict):
         flow_in  = sum(m.x[i, node, k] for i in m.InArcs[node])
         return flow_out - flow_in == m.Dem[node, k]
     m.flow_constr = pyo.Constraint(m.N, m.K, rule=flow_rule)
+    return m
 
+
+def nf_pyomo_build(data: dict):
+    m = nf_pyomo_model(data)
     opt = SolverFactory("gurobi_persistent")
     opt.set_instance(m)
     return opt._solver_model
@@ -240,7 +294,7 @@ def gen_bom(n_p: int, n_c: int, n_t: int, avg_uses: int = 3, seed: int = 3) -> d
     }
 
 
-def bom_pyomo_build(data: dict):
+def bom_pyomo_model(data: dict) -> pyo.ConcreteModel:
     m = pyo.ConcreteModel()
     m.P              = pyo.Set(initialize=data["Products"])
     m.C              = pyo.Set(initialize=data["Components"])
@@ -259,7 +313,11 @@ def bom_pyomo_build(data: dict):
         return m.buy[c, t] == sum(m.BOM[p, c] * m.build[p, t]
                                   for p in m.ProdsUsingComp[c])
     m.comp_constr = pyo.Constraint(m.C, m.T, rule=comp_rule)
+    return m
 
+
+def bom_pyomo_build(data: dict):
+    m = bom_pyomo_model(data)
     opt = SolverFactory("gurobi_persistent")
     opt.set_instance(m)
     return opt._solver_model
@@ -281,17 +339,19 @@ BOM_SIZES = [
 
 @dataclass
 class ProblemSpec:
-    name:      str
-    pyomo_fn:  Callable
-    gen_fn:    Callable
-    sizes:     list
-    n_vars_fn: Callable
+    name:           str
+    pyomo_fn:       Callable   # returns gurobipy Model via gurobi_persistent
+    pyomo_model_fn: Callable   # returns pyo.ConcreteModel (for templatized path)
+    gen_fn:         Callable
+    sizes:          list
+    n_vars_fn:      Callable
 
 
 PROBLEMS = [
     ProblemSpec(
         name="Supply-Demand (P1)",
         pyomo_fn=sd_pyomo_build,
+        pyomo_model_fn=sd_pyomo_model,
         gen_fn=gen_supply_demand,
         sizes=SD_SIZES,
         n_vars_fn=lambda n_i, n_j, seed: n_i * n_j,
@@ -299,6 +359,7 @@ PROBLEMS = [
     ProblemSpec(
         name="Network Flow (P1+P3)",
         pyomo_fn=nf_pyomo_build,
+        pyomo_model_fn=nf_pyomo_model,
         gen_fn=gen_network_flow,
         sizes=NF_SIZES,
         n_vars_fn=lambda n_nodes, avg_degree, n_k, seed: n_nodes * avg_degree * n_k,
@@ -306,6 +367,7 @@ PROBLEMS = [
     ProblemSpec(
         name="BOM / Cross-dim (P4+P6)",
         pyomo_fn=bom_pyomo_build,
+        pyomo_model_fn=bom_pyomo_model,
         gen_fn=gen_bom,
         sizes=BOM_SIZES,
         n_vars_fn=lambda n_p, n_c, n_t, seed: (n_p + n_c) * n_t,
@@ -314,6 +376,7 @@ PROBLEMS = [
 
 METHODS = [
     ("Pyomo",           "#d62728"),
+    ("Pyomo+Template",  "#ff7f0e"),
     ("gurobipy-pandas", "#1f77b4"),
     ("COO + MVar",      "#2ca02c"),
 ]
@@ -325,25 +388,33 @@ METHODS = [
 
 def run_benchmark(spec: ProblemSpec) -> list[dict]:
     try:
-        gppd_builder = _make_builder(spec.pyomo_fn, _old_tr)
+        tpl_builder = _make_template_direct_builder(spec.pyomo_model_fn)
+    except Exception as e:
+        print(f"  [WARN] Pyomo+Template builder failed: {e}")
+        tpl_builder = None
+
+    try:
+        gppd_builder = _make_builder(spec.pyomo_model_fn, _old_tr)
     except Exception as e:
         print(f"  [WARN] gurobipy-pandas translation failed: {e}")
         gppd_builder = None
 
     try:
-        mvar_builder = _make_builder(spec.pyomo_fn, _new_tr)
+        mvar_builder = _make_builder(spec.pyomo_model_fn, _new_tr)
     except Exception as e:
         print(f"  [WARN] COO+MVar translation failed: {e}")
         mvar_builder = None
 
     builders = {
         "Pyomo":           spec.pyomo_fn,
+        "Pyomo+Template":  tpl_builder,
         "gurobipy-pandas": gppd_builder,
         "COO + MVar":      mvar_builder,
     }
 
     rows = []
-    pyomo_skipped = False
+    pyomo_skipped    = False
+    template_skipped = False
 
     for size_label, kwargs in spec.sizes:
         data   = spec.gen_fn(**kwargs)
@@ -358,9 +429,11 @@ def run_benchmark(spec: ProblemSpec) -> list[dict]:
                 skip_reason = "N/A"
             elif method_label == "Pyomo" and pyomo_skipped:
                 skip_reason = "TIMEOUT"
+            elif method_label == "Pyomo+Template" and template_skipped:
+                skip_reason = "TIMEOUT"
 
             if skip_reason:
-                print(f"    {method_label:<20s} {skip_reason}")
+                print(f"    {method_label:<22s} {skip_reason}")
                 rows.append({"problem": spec.name, "method": method_label,
                              "n_vars": n_vars, "build_s": float("nan"), "skipped": True})
                 continue
@@ -369,17 +442,19 @@ def run_benchmark(spec: ProblemSpec) -> list[dict]:
                 _, elapsed = _timed(builder, data)
                 build_s = elapsed
             except Exception as e:
-                print(f"    {method_label:<20s} ERROR: {e}")
+                print(f"    {method_label:<22s} ERROR: {e}")
                 rows.append({"problem": spec.name, "method": method_label,
                              "n_vars": n_vars, "build_s": float("nan"), "skipped": True})
                 continue
 
             if method_label == "Pyomo" and build_s / 60.0 > PYOMO_TIMEOUT_MIN:
                 pyomo_skipped = True
+            if method_label == "Pyomo+Template" and build_s / 60.0 > TEMPLATE_TIMEOUT_MIN:
+                template_skipped = True
 
             rows.append({"problem": spec.name, "method": method_label,
                          "n_vars": n_vars, "build_s": build_s, "skipped": False})
-            print(f"    {method_label:<20s} {build_s / 60.0:>8.3f} min")
+            print(f"    {method_label:<22s} {build_s / 60.0:>8.3f} min")
 
     return rows
 
@@ -394,8 +469,8 @@ def plot_results(all_rows: list[dict], out_path: str = "benchmark_results.png"):
                  fontsize=14, fontweight="bold", y=1.01)
 
     colors  = {m: c for m, c in METHODS}
-    markers = {"Pyomo": "o", "gurobipy-pandas": "s", "COO + MVar": "^"}
-    ls_map  = {"Pyomo": "--", "gurobipy-pandas": "-.", "COO + MVar": "-"}
+    markers = {"Pyomo": "o", "Pyomo+Template": "s", "gurobipy-pandas": "^", "COO + MVar": "D"}
+    ls_map  = {"Pyomo": "--", "Pyomo+Template": "-", "gurobipy-pandas": "-.", "COO + MVar": ":"}
 
     for ax, spec in zip(axes, PROBLEMS):
         rows = [r for r in all_rows if r["problem"] == spec.name]
