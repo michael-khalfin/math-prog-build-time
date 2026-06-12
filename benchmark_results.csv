@@ -1,49 +1,61 @@
 problem,method,n_vars,build_s,skipped
-Supply-Demand (P1),Pyomo,10000,0.07174483351991512,False
-Supply-Demand (P1),gurobipy-pandas,10000,0.09611231301096268,False
-Supply-Demand (P1),COO + MVar,10000,0.30329152097692713,False
-Supply-Demand (P1),Pyomo,90000,0.7417637500038836,False
-Supply-Demand (P1),gurobipy-pandas,90000,0.3537478334910702,False
-Supply-Demand (P1),COO + MVar,90000,0.055247146025067195,False
-Supply-Demand (P1),Pyomo,360000,3.2394123955164105,False
-Supply-Demand (P1),gurobipy-pandas,360000,1.4975580419995822,False
-Supply-Demand (P1),COO + MVar,360000,0.22827375051565468,False
-Supply-Demand (P1),Pyomo,1000000,9.948265145503683,False
-Supply-Demand (P1),gurobipy-pandas,1000000,4.2370040209789295,False
-Supply-Demand (P1),COO + MVar,1000000,0.6421464169980027,False
-Supply-Demand (P1),Pyomo,2250000,25.025543333467795,False
-Supply-Demand (P1),gurobipy-pandas,2250000,10.160500313009834,False
-Supply-Demand (P1),COO + MVar,2250000,1.4273464794678148,False
-Supply-Demand (P1),Pyomo,4000000,46.853471707960125,False
-Supply-Demand (P1),gurobipy-pandas,4000000,18.03518829200766,False
-Supply-Demand (P1),COO + MVar,4000000,2.5526173330144957,False
-Network Flow (P1+P3),Pyomo,24000,0.28165599951171316,False
-Network Flow (P1+P3),gurobipy-pandas,24000,0.13662502099759877,False
-Network Flow (P1+P3),COO + MVar,24000,0.030388584011234343,False
-Network Flow (P1+P3),Pyomo,120000,1.9164985834795516,False
-Network Flow (P1+P3),gurobipy-pandas,120000,0.746588354522828,False
-Network Flow (P1+P3),COO + MVar,120000,0.1305085834756028,False
-Network Flow (P1+P3),Pyomo,360000,6.16501029196661,False
-Network Flow (P1+P3),gurobipy-pandas,360000,2.5910464789776597,False
-Network Flow (P1+P3),COO + MVar,360000,0.422617687494494,False
-Network Flow (P1+P3),Pyomo,960000,16.405295104486868,False
-Network Flow (P1+P3),gurobipy-pandas,960000,6.5613228124857415,False
-Network Flow (P1+P3),COO + MVar,960000,1.0550202709855512,False
-Network Flow (P1+P3),Pyomo,1800000,30.290624978981214,False
-Network Flow (P1+P3),gurobipy-pandas,1800000,12.213385062495945,False
-Network Flow (P1+P3),COO + MVar,1800000,1.9217558960081078,False
-BOM / Cross-dim (P4+P6),Pyomo,6000,0.1107039375056047,False
-BOM / Cross-dim (P4+P6),gurobipy-pandas,6000,0.03545164599199779,False
-BOM / Cross-dim (P4+P6),COO + MVar,6000,0.014695749996462837,False
-BOM / Cross-dim (P4+P6),Pyomo,30000,0.6469008124840911,False
-BOM / Cross-dim (P4+P6),gurobipy-pandas,30000,0.18842243749531917,False
-BOM / Cross-dim (P4+P6),COO + MVar,30000,0.049374020483810455,False
-BOM / Cross-dim (P4+P6),Pyomo,120000,2.9666699584922753,False
-BOM / Cross-dim (P4+P6),gurobipy-pandas,120000,0.7190926669863984,False
-BOM / Cross-dim (P4+P6),COO + MVar,120000,0.17391372949350625,False
-BOM / Cross-dim (P4+P6),Pyomo,360000,8.687653062486788,False
-BOM / Cross-dim (P4+P6),gurobipy-pandas,360000,1.9903890830173623,False
-BOM / Cross-dim (P4+P6),COO + MVar,360000,0.534975749993464,False
-BOM / Cross-dim (P4+P6),Pyomo,720000,17.82678402098827,False
-BOM / Cross-dim (P4+P6),gurobipy-pandas,720000,3.9051538960193284,False
-BOM / Cross-dim (P4+P6),COO + MVar,720000,1.2090038539899979,False
+Supply-Demand (P1),Pyomo,5290000,61.53707337501692,False
+Supply-Demand (P1),Pyomo+Template,5290000,15.732189625006868,False
+Supply-Demand (P1),gurobipy-pandas,5290000,25.006708625005558,False
+Supply-Demand (P1),COO + MVar,5290000,3.298512666980969,False
+Supply-Demand (P1),Pyomo,10890000,155.44172479197732,False
+Supply-Demand (P1),Pyomo+Template,10890000,30.215479833015706,False
+Supply-Demand (P1),gurobipy-pandas,10890000,48.22335370798828,False
+Supply-Demand (P1),COO + MVar,10890000,6.653023624996422,False
+Supply-Demand (P1),Pyomo,22090000,574.3489396669902,False
+Supply-Demand (P1),Pyomo+Template,22090000,65.0223632910056,False
+Supply-Demand (P1),gurobipy-pandas,22090000,100.4816956249997,False
+Supply-Demand (P1),COO + MVar,22090000,13.50325849998626,False
+Supply-Demand (P1),Pyomo,42250000,4826.193053625,False
+Supply-Demand (P1),Pyomo+Template,42250000,182.41216012500809,False
+Supply-Demand (P1),gurobipy-pandas,42250000,221.15729800000554,False
+Supply-Demand (P1),COO + MVar,42250000,33.03951120900456,False
+Supply-Demand (P1),Pyomo,81000000,nan,True
+Supply-Demand (P1),Pyomo+Template,81000000,532.1654583330092,False
+Supply-Demand (P1),gurobipy-pandas,81000000,603.0542366250011,False
+Supply-Demand (P1),COO + MVar,81000000,98.94294354101294,False
+Network Flow (P1+P3),Pyomo,5250000,84.47822137500043,False
+Network Flow (P1+P3),Pyomo+Template,5250000,23.617694749991642,False
+Network Flow (P1+P3),gurobipy-pandas,5250000,35.654924375005066,False
+Network Flow (P1+P3),COO + MVar,5250000,5.3833944170037284,False
+Network Flow (P1+P3),Pyomo,10125000,187.185221791995,False
+Network Flow (P1+P3),Pyomo+Template,10125000,47.17803849998745,False
+Network Flow (P1+P3),gurobipy-pandas,10125000,69.50863791600568,False
+Network Flow (P1+P3),COO + MVar,10125000,10.512184250022983,False
+Network Flow (P1+P3),Pyomo,18810000,629.2285577080038,False
+Network Flow (P1+P3),Pyomo+Template,18810000,95.82515370799229,False
+Network Flow (P1+P3),gurobipy-pandas,18810000,131.76320737498463,False
+Network Flow (P1+P3),COO + MVar,18810000,19.391601250012172,False
+Network Flow (P1+P3),Pyomo,34560000,7511.3463463749795,False
+Network Flow (P1+P3),Pyomo+Template,34560000,300.4426145409816,False
+Network Flow (P1+P3),gurobipy-pandas,34560000,323.7578344589856,False
+Network Flow (P1+P3),COO + MVar,34560000,53.96600329200737,False
+Network Flow (P1+P3),Pyomo,56760000,nan,True
+Network Flow (P1+P3),Pyomo+Template,56760000,469.6568869170151,False
+Network Flow (P1+P3),gurobipy-pandas,56760000,772.557563624985,False
+Network Flow (P1+P3),COO + MVar,56760000,81.21680204101722,False
+BOM / Cross-dim (P4+P6),Pyomo,2400000,55.060231542011024,False
+BOM / Cross-dim (P4+P6),Pyomo+Template,2400000,448.3287726670096,False
+BOM / Cross-dim (P4+P6),gurobipy-pandas,2400000,12.454042041994398,False
+BOM / Cross-dim (P4+P6),COO + MVar,2400000,3.3837598329992034,False
+BOM / Cross-dim (P4+P6),Pyomo,4500000,111.52458825000213,False
+BOM / Cross-dim (P4+P6),Pyomo+Template,4500000,2824.0400210410007,False
+BOM / Cross-dim (P4+P6),gurobipy-pandas,4500000,37.25510670800577,False
+BOM / Cross-dim (P4+P6),COO + MVar,4500000,6.269765417004237,False
+BOM / Cross-dim (P4+P6),Pyomo,7920000,244.8595435830066,False
+BOM / Cross-dim (P4+P6),Pyomo+Template,7920000,nan,True
+BOM / Cross-dim (P4+P6),gurobipy-pandas,7920000,46.21548474999145,False
+BOM / Cross-dim (P4+P6),COO + MVar,7920000,11.982227250002325,False
+BOM / Cross-dim (P4+P6),Pyomo,14400000,1037.7327410409926,False
+BOM / Cross-dim (P4+P6),Pyomo+Template,14400000,nan,True
+BOM / Cross-dim (P4+P6),gurobipy-pandas,14400000,141.50080262499978,False
+BOM / Cross-dim (P4+P6),COO + MVar,14400000,25.87752037498285,False
+BOM / Cross-dim (P4+P6),Pyomo,24300000,9847.932954499993,False
+BOM / Cross-dim (P4+P6),Pyomo+Template,24300000,nan,True
+BOM / Cross-dim (P4+P6),gurobipy-pandas,24300000,414.3903669590072,False
+BOM / Cross-dim (P4+P6),COO + MVar,24300000,36.72234175002086,False
