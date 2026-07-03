@@ -54,6 +54,7 @@ class SumTermInfo:
     iter_is_indexed: bool
     iter_index_arg: Optional[str]  # subscript arg when indexed
     var_subscript_args: list = field(default_factory=list)  # args in m.var[a, b, c]
+    param_subscript_args: list = field(default_factory=list)  # args in m.Param[a, b]
     scalar_coeff: float = 1.0   # constant multiplier e.g. 0.1 * var
     # Intra-sum linear combination: all (var_name, param_name, subscript_args, sign) terms
     # sign is +1 or -1; populated when elt is any linear combination of vars
@@ -658,6 +659,7 @@ class _RuleClassifier:
         var_subscript_args = []
 
         intra_terms: list = []
+        param_subscript_args: list = []
 
         scalar_coeff_val = 1.0   # overridden in the Mult branch when a literal is present
 
@@ -668,6 +670,7 @@ class _RuleClassifier:
                 var_subscript_args = _extract_subscript_args(elt)
             elif vn and vn in self.t.params:
                 param_name = vn
+                param_subscript_args = _extract_subscript_args(elt)
         elif isinstance(elt, ast.BinOp) and isinstance(elt.op, ast.Mult):
             # param * var  or  var * param  or  constant * var
             for side in [elt.left, elt.right]:
@@ -684,6 +687,7 @@ class _RuleClassifier:
                     var_subscript_args = _extract_subscript_args(side)
                 elif attr in self.t.params:
                     param_name = attr
+                    param_subscript_args = _extract_subscript_args(side)
         elif isinstance(elt, ast.BinOp) and isinstance(elt.op, (ast.Add, ast.Sub)):
             # General intra-sum linear combination: x + y - z, a*x + b*y, etc.
             intra_terms = self._parse_linear_comb(elt)
@@ -702,6 +706,7 @@ class _RuleClassifier:
             iter_is_indexed=iter_is_indexed,
             iter_index_arg=iter_index_arg,
             var_subscript_args=var_subscript_args,
+            param_subscript_args=param_subscript_args,
             scalar_coeff=coeff,
             intra_terms=intra_terms,
         )
@@ -765,6 +770,9 @@ class _IndexRegistry:
         # (e.g. Arcs in a P3 balance), derive dimension names from loop-var positions
         # recorded in var_subscript_args across all terms.
         self._register_var_dims_from_all_terms()
+        # Pass 4: derive names for param index sets that appear nowhere else
+        # (e.g. a sparse dimen=2 pair set used only as a Param domain).
+        self._register_param_dims_from_all_terms()
 
     def _register_from_constr(self, ci: ConstrInfo):
         rule_arg_cursor = 0
@@ -825,6 +833,27 @@ class _IndexRegistry:
                     if all(n is not None for n in names):
                         self.registry[set_name] = names
                 cursor += dimen
+
+    def _register_param_dims_from_all_terms(self):
+        """Derive index-level names for param index sets from the subscript
+        args used in the rules (positional, mirroring pass 3)."""
+        for ci in self.t.constrs:
+            for term in ci.lhs_terms + ci.rhs_terms:
+                if not (term.param_name and term.param_subscript_args):
+                    continue
+                pi = self.t.params.get(term.param_name)
+                if pi is None:
+                    continue
+                sargs = term.param_subscript_args
+                cursor = 0
+                for set_name in pi.index_sets:
+                    si = self.t.sets.get(set_name)
+                    dimen = si.dimen if si else 1
+                    if set_name not in self.registry:
+                        names = sargs[cursor:cursor + dimen]
+                        if len(names) == dimen:
+                            self.registry[set_name] = names
+                    cursor += dimen
 
     def names_for(self, set_name: str) -> list[str]:
         if set_name in self.registry:
