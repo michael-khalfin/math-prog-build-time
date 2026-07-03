@@ -13,6 +13,23 @@ Expected total wall-clock time: 2 – 3 hours.
 
 All methods are derived from the same Pyomo model-building function.
 
+Measurement protocol
+--------------------
+The cyclic garbage collector is DISABLED for the whole run (gc.disable()).
+CPython triggers GC passes based on allocation counts; building a model with
+tens of millions of Python objects both triggers many passes and makes each
+pass scan an ever-larger live heap — a superlinear timing artifact that has
+nothing to do with the code under test.  Before every timed build we run three
+manual gc.collect() calls so each test starts from the same clean heap, and we
+time strictly between collections.
+
+pyomo.common.timing.report_timing() is enabled at DEBUG level for the whole
+run: every Pyomo build prints per-component construction times
+(Set/Param/Var/Constraint), and the LinearStandardFormCompiler prints its
+writer phases (logged to pyomo.common.timing.writer, DEBUG-gated).  That is
+one line per *component* — roughly a dozen lines per build — so it rides
+along with the sweep at negligible cost.  Pass --no-timing to disable.
+
 Output
 ------
   benchmark_results.png  — three-panel log-log chart (minutes on y-axis)
@@ -22,6 +39,7 @@ Output
 from __future__ import annotations
 
 import csv
+import gc
 import random
 import sys
 import time
@@ -41,6 +59,7 @@ import pyomo.environ as pyo
 from pyomo.repn.plugins.standard_form import LinearStandardFormCompiler
 from pyomo.core.base import constraint as _pyo_con_mod
 from pyomo.core.base import objective as _pyo_obj_mod
+from pyomo.common.timing import report_timing
 
 import translator     as _new_tr   # COO + MVar
 import importlib.util
@@ -78,6 +97,12 @@ def _make_builder(pyomo_fn: Callable, translator_mod) -> Callable:
 
 
 def _timed(fn: Callable, data: dict) -> tuple[object, float]:
+    """Time one build under the expert GC protocol: three manual collections
+    to reach a clean, reproducible heap state (gc is disabled globally in
+    __main__), then time strictly between collections."""
+    gc.collect()
+    gc.collect()
+    gc.collect()
     t0 = time.perf_counter()
     result = fn(data)
     return result, time.perf_counter() - t0
@@ -290,7 +315,8 @@ def gen_bom(n_p: int, n_c: int, n_t: int, avg_uses: int = 3, seed: int = 3) -> d
 
     return {
         "Products": P, "Components": C, "Time": T,
-        "BOM": bom, "Cap": cap, "ProdsUsingComp": prods_using,
+        "BOM": bom, "BOMPairs": sorted(bom.keys()),
+        "Cap": cap, "ProdsUsingComp": prods_using,
     }
 
 
@@ -300,7 +326,12 @@ def bom_pyomo_model(data: dict) -> pyo.ConcreteModel:
     m.C              = pyo.Set(initialize=data["Components"])
     m.T              = pyo.Set(initialize=data["Time"])
     m.ProdsUsingComp = pyo.Set(m.C, initialize=data["ProdsUsingComp"])
-    m.BOM            = pyo.Param(m.P, m.C, initialize=data["BOM"], default=0)
+    # Structural sparsity: BOM is declared over the sparse (p, c) pair set —
+    # the same way Network Flow declares Cap over m.E — instead of the dense
+    # P × C domain with default=0.  The sparsity is part of the model
+    # structure, not an artifact of which data entries happen to exist.
+    m.BOMPairs       = pyo.Set(dimen=2, initialize=data["BOMPairs"])
+    m.BOM            = pyo.Param(m.BOMPairs, initialize=data["BOM"])
     m.Cap            = pyo.Param(m.P, m.T, initialize=data["Cap"])
     m.build          = pyo.Var(m.P, m.T, domain=pyo.NonNegativeReals)
     m.buy            = pyo.Var(m.C, m.T, domain=pyo.NonNegativeReals)
@@ -514,14 +545,30 @@ def plot_results(all_rows: list[dict], out_path: str = "benchmark_results.png"):
 if __name__ == "__main__":
     _ = gp.Model()   # eat licence-check overhead
 
+    if "--no-timing" not in sys.argv:
+        # Pyomo's built-in instrumentation, on by default (expert advice):
+        # INFO gives per-component construction times; DEBUG additionally
+        # unlocks the standard-form writer's phase timing (the
+        # with_debug_timing gate in pyomo/repn/plugins/standard_form.py).
+        import logging
+        report_timing(level=logging.DEBUG)
+
     all_rows: list[dict] = []
 
-    for spec in PROBLEMS:
-        print(f"\n{'═' * 70}")
-        print(f"  {spec.name}")
-        print(f"{'═' * 70}")
-        rows = run_benchmark(spec)
-        all_rows.extend(rows)
+    # Expert protocol: disable the cyclic GC for all measurements.  Each
+    # timed build is preceded by three manual collections (see _timed), so
+    # every test starts from the same clean heap and no GC pass lands
+    # inside a timed region.
+    gc.disable()
+    try:
+        for spec in PROBLEMS:
+            print(f"\n{'═' * 70}")
+            print(f"  {spec.name}")
+            print(f"{'═' * 70}")
+            rows = run_benchmark(spec)
+            all_rows.extend(rows)
+    finally:
+        gc.enable()
 
     csv_path = "benchmark_results.csv"
     with open(csv_path, "w", newline="") as f:
