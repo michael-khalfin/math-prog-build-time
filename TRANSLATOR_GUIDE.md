@@ -5,8 +5,8 @@ equivalent functions that use Gurobi's matrix API directly:
 
 - **`build_vectorized_model(data)`** — builds the model using `addMVar` + `addMConstr`
   (scipy sparse COO matrices, O(1) C-API calls per constraint block)
-- **`update_vectorized_model(m, new_data)`** — hot-swaps RHS values and the objective
-  on an already-built model via `MConstr.setAttr('RHS', ...)`, without rebuilding
+- **`update_vectorized_model(m, new_data)`** — updates an already-built model with new
+  parameter values and re-exposes it for re-optimization, without rebuilding variables
 
 ```python
 from translator import translate, solve, populate_pyomo, solution_proxy
@@ -14,16 +14,16 @@ import examples.example_1_supply as ex1
 
 # Option A — inspect generated code
 code = translate(ex1.build_pyomo_model)
-exec(compile(code, "<translated>", "exec"))
-model = build_vectorized_model(ex1.data)
+exec(code, ns := {})
+model = ns['build_vectorized_model'](ex1.data)
 
 # Option B — translate, solve, and get values back in one call
 gp_model, values = solve(ex1.build_pyomo_model, ex1.data)
 populate_pyomo(ex1.build_pyomo_model(ex1.data), values)
 
-# Option C — build once, then update RHS and re-solve (no rebuild)
-exec(compile(code, "<translated>", "exec"))
-m = build_vectorized_model(ex1.data)
+# Option C — build once, update parameters, re-solve (no variable rebuild)
+exec(code, ns := {})
+m = ns['build_vectorized_model'](ex1.data)
 m.optimize()
 new_data = {**ex1.data, 'Supply': {'Plant_A': 200, 'Plant_B': 300}}
 update_vectorized_model(m, new_data)
@@ -167,11 +167,19 @@ def update_vectorized_model(m, new_data):
 ```
 
 Call `m.reset()` before re-optimising after an update (clears the incumbent
-without discarding the constraint matrix).
+without discarding the variable objects).
 
-**What update does NOT change:** the sparsity structure (A matrix), variable
-bounds, variable types, or the index sets. If any of those need to change,
-call `build_vectorized_model` again.
+**What update changes depends on the constraint type:**
+
+| Constraint type | How update handles it | Warm-start preserved? |
+|---|---|---|
+| RHS-only (structural A matrix: 1s/−1s) | `setAttr('RHS', …)` on existing `MConstr` | Yes — LP basis intact |
+| Matrix-coefficient (param values in A) | `m.remove` + full COO rebuild + re-add | No — A change invalidates basis |
+| Objective | `m.setObjective(…)` with new coefficient vector | Yes |
+
+**What update does NOT change:** variable objects, variable bounds, variable
+types, or the index sets. If any of those need to change, call
+`build_vectorized_model` again.
 
 ---
 
@@ -384,35 +392,44 @@ populate_pyomo(pyo_m, values)
 from translator import translate
 
 code = translate(build_pyomo_model)
-exec(compile(code, "<translated>", "exec"))
+exec(code, ns := {})
 
 # Build once
-m = build_vectorized_model(data)
+m = ns['build_vectorized_model'](data)
 m.setParam('OutputFlag', 0)
 m.optimize()
 
-# Change RHS/objective, re-solve without rebuilding
-update_vectorized_model(m, new_data)
-m.reset()       # clears incumbent; keeps A, bounds, types
+# Update parameters, re-solve without rebuilding variables
+ns['update_vectorized_model'](m, new_data)
+m.reset()       # clears incumbent; keeps variables, bounds, types
 m.optimize()
 ```
 
-`update_vectorized_model` updates:
-- **RHS vectors** for all constraints whose RHS param fully covers the
-  constraint dimension (tracked in `m._rhs_ord`).
-- **Objective coefficients** if the model has a parameterised objective.
+`update_vectorized_model` handles two cases:
 
-It does **not** update: the A matrix, variable bounds, variable types, or index
-sets. Rebuild with `build_vectorized_model` if the structure changes.
+- **RHS-only constraints** (A matrix has structural 1s/−1s only): calls
+  `MConstr.setAttr('RHS', …)` — the LP basis is preserved and warm-starting
+  works. This covers P1 without a weighted param, P3, P5, P6.
+- **Matrix-coefficient constraints** (param values appear inside the sum):
+  calls `m.remove` on the old constraint, rebuilds the COO sparse matrix with
+  new param values, and re-adds via `addMConstr`/`addConstr`. The LP basis is
+  invalidated by the coefficient change regardless, so no warm-start
+  opportunity is lost. This covers P1 with weighted param, P2, P4, P_inter_add,
+  P_intra_add when those constraints carry a param inside the sum.
+- **Objective**: always re-emitted via `m.setObjective(…)`.
+
+It does **not** update: variable objects, variable bounds, variable types, or
+index sets. Rebuild with `build_vectorized_model` if those change.
 
 ### Model attributes stored for update
 
 | Attribute | Type | Purpose |
 |---|---|---|
-| `m._mconstr` | `dict[str, MConstr]` | Constraint objects, keyed by Pyomo name |
-| `m._rhs_ord` | `dict[str, pd.Index]` | Index ordering used when RHS was set |
+| `m._mconstr` | `dict[str, MConstr]` | Constraint handles, keyed by Pyomo name |
+| `m._rhs_ord` | `dict[str, pd.Index]` | Row ordering for `setAttr('RHS', …)` |
+| `m._constr_idx` | `dict[str, pd.Index]` | Row ordering for matrix-coefficient rebuilds |
 | `m._mvars` | `dict[str, MVar]` | Variable MVar objects |
-| `m._var_idx` | `dict[str, pd.MultiIndex]` | Variable index (for re-indexing params) |
+| `m._var_idx` | `dict[str, pd.MultiIndex]` | Variable index (for rebuilding flat frames) |
 | `m._get_values` | `lambda` | `() → {var_name: pd.Series}` after solve |
 
 ---
