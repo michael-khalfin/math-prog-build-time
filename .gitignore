@@ -3,3 +3,9 @@ __pycache__/
 *.pyo
 visualize_output/
 *.html
+*.out
+*.fls
+*.fdb_latexmk
+*.aux
+*.synctex(busy)
+*_minted

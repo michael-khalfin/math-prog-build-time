@@ -1,0 +1,208 @@
+\documentclass[]{article}
+\usepackage{longtable}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{fullpage}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{bbm}
+\usepackage{tikz}
+\usepackage{fancyhdr}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{bbm}
+\usepackage{mwe}
+\usepackage{minted}
+\usepackage{hyperref}
+\usepackage{placeins}
+\def\marking{CUI//PROPIN}
+\allowdisplaybreaks
+\setlength{\headheight}{15.2pt}
+\setlength{\headsep}{15pt}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead{}
+\fancyfoot{}
+\fancyhead[C]{\marking}
+\fancyfoot[C]{\marking}
+\fancyfoot[R]{\thepage}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds, calc}
+
+\begin{document}
+\begin{center}
+\huge Using LLMs to Build Gurobi Models In Record-Breaking Time\\
+\normalsize Michael Khalfin\\
+\today
+\end{center}
+
+\section{Introduction}
+
+Mathematical programming is typically organized around three tasks: modeling, solving, and interpreting results. In the modeling stage, informal requirements and constraints are translated into mathematical objects such as sets, variables, parameters, constraints, and objective functions. Algebraic Modeling Languages (AMLs) provide a software layer for expressing these objects independently of solver-specific details. Pyomo is a widely used AML embedded in Python, allowing users to formulate optimization models with readable Python syntax while retaining access to a broad range of solvers (e.g., CBC, GLPK, IPOPT, CPLEX, or Gurobi) \cite{hart2011pyomo, bynum2021pyomo}. For example, a capacity-constrained supply model can be written in Pyomo as follows:
+
+\begin{minted}{python}
+import pyomo.environ as pyo
+
+data = {
+    'Plants': ['Plant_A', 'Plant_B'],
+    'Markets': ['Market_1', 'Market_2', 'Market_3'],
+    'Supply': {'Plant_A': 100, 'Plant_B': 150}
+}
+
+def build_pyomo_model(data):
+    m = pyo.ConcreteModel()
+    m.Plants = pyo.Set(initialize=data['Plants'])
+    m.Markets = pyo.Set(initialize=data['Markets'])
+    m.x = pyo.Var(m.Plants, m.Markets, domain=pyo.NonNegativeReals)
+    m.Supply = pyo.Param(m.Plants, initialize=data['Supply'])
+
+    def supply_rule(m, i):
+        return sum(m.x[i, j] for j in m.Markets) <= m.Supply[i]
+    m.supply_constr = pyo.Constraint(m.Plants, rule=supply_rule)
+    
+    def supply_sum(m):
+        return sum(m.x[i, j] for i in m.Plants for j in m.Markets)
+    m.TotalVolume = pyo.Objective(rule=supply_sum, sense=pyo.maximize)
+    
+    return m
+
+model = build_pyomo_model(data)
+\end{minted}
+
+Following the execution of \texttt{build\_pyomo\_model(data)}, Pyomo constructs a \textit{ConcreteModel}, an in-memory object-oriented representation of the mathematical program. Pyomo sequentially evaluates the provided rules, mapping sets and parameters to decision variables to construct a symbolic algebraic expression tree.
+
+Then, when a user calls a solver, Pyomo must translate its rich expression tree into a format the target solver understands. To handle this translation for Gurobi, Pyomo provides specialized backends. While older pipelines relied on writing intermediate text files (e.g., LP or NL formats) to disk, modern implementations bypass disk I/O entirely using Python bindings. Two of these interfaces are \texttt{gurobi\_direct}, which generates a one-time in-memory Gurobi model, and \texttt{gurobi\_persistent}, which maintains the solver object in memory to facilitate repeated solves without rebuilding. 
+
+However, for large-scale problems with millions of decision variables, Pyomo’s model construction and solver translation steps can become a bottleneck, taking hours or exceeding available memory. Solver-native APIs such as Gurobi’s \texttt{addMVar} and matrix operations avoid much of this overhead by constructing sparse numerical representations directly, but they are typically less readable and harder to modify than AML formulations.
+
+Thus, the standard workflow involves a tradeoff between modeling convenience and construction speed. Recent work on Pyomo \texttt{templatization} reduces model-generation overhead, but it is incompatible with the \texttt{gurobi\_persistent} backend. As a result, the standard workflow in \autoref{fig:diagram1} forces users to choose between faster initial construction and faster iterative re-solving.
+
+\begin{figure}[h]
+    \centering
+    \resizebox{0.8\textwidth}{!}{%
+        \input{../diagram1/diagram1}%
+    }
+    \caption{The workflow that Pyomo assumes by default.}
+    \label{fig:diagram1}
+\end{figure}
+
+This workflow has an additional drawback: the user may only discover infeasibility or unboundedness after the Pyomo model has already been built and translated. If the formulation or data must then be revised, the expensive construction process is repeated.
+
+A more efficient workflow is shown in \autoref{fig:diagram2}. The Pyomo formulation remains the canonical, readable specification, but it is immediately \textit{transpiled} into Gurobi-native model-building code rather than instantiated first.\footnote{By transpilation, we mean source-to-source translation: converting Pyomo model-building code into Python code that constructs the corresponding Gurobi model directly.
+} This enables faster iteration when the model is infeasible or unbounded. Once feasibility is established, the Pyomo model can be instantiated retroactively to access the benefits of the modeling layer.
+
+\begin{figure}[ht]
+    \centering
+    \resizebox{0.75\textwidth}{!}{%
+        \input{../diagram2/diagram2}%
+    }
+    \caption{The Pyomo-to-Gurobi workflow developed in this paper, which preserves Pyomo as the canonical specification while enabling direct Gurobi-native model construction. 
+    % (We can have our cake and eat it too.)
+    }
+    \label{fig:diagram2}
+\end{figure}
+\clearpage
+
+The central idea of this paper is that a frontier large-language model (LLM), used through an agentic coding workflow, can generate and refine a deterministic Python transpiler that converts human-readable Pyomo formulations into Gurobi-native model-building code. As shown in \autoref{fig:diagram3}, the stochastic component is confined to development of the transpiler. Once generated, the transpiler is an ordinary Python artifact: deterministic in execution, inspectable, testable, benchmarkable, and repairable.
+
+\begin{figure}[ht]
+    \centering
+    \resizebox{0.75\textwidth}{!}{%
+        \input{../diagram3/diagram3}%
+    }
+    \caption{Development and verification of the transpiler using an agentic loop. Note that the 4 process nodes are the same as in \autoref{fig:diagram2}.}
+    \label{fig:diagram3}
+\end{figure}
+
+Its outputs are vetted by differential testing. For a given formulation, both the original Pyomo code and the transpiled Gurobi-native code are executed on the same data, and the resulting solver-level model structures are compared. Because the data is an explicit input, this validation is computationally inexpensive: we can repeatedly test on truncated datasets that preserve the full problem's indexing structure while keeping Pyomo's instantiation quick. If the two implementations construct identical models across multiple reduced instances, it becomes highly unlikely that the transpiler is merely coincidentally correct. The same deterministic code can then be run at full scale.
+
+This approach provides a different trust model from much of the recent literature on LLMs for optimization. Rather than treating the LLM as a black-box optimizer or an oracle for formulation quality, we deploy it to produce an intermediate software artifact whose behavior can be validated and iteratively repaired. Failed tests are returned to the agent, while passing cases are retained as regression tests. Although we focus on Pyomo-to-Gurobi transpilation, the methodology generalizes across the modeling ecosystem: LLM-assisted transpilers can translate between any AMLs, solver APIs, or optimization transformations. More broadly, this pattern of data-parametric validation applies whenever a trusted reference implementation exists and is highly dependent on input data. By validating equivalence on reduced instances, developers can confidently deploy deterministic, agent-generated code at scale.
+
+To demonstrate the efficacy of this approach, we preview the build times for three canonical models in \autoref{tab:supply-demand}, \autoref{tab:network-flow}, and \autoref{tab:bom}. These tables compare standard Pyomo, Pyomo-templatization, an early transpiler version using \texttt{gurobipy-pandas}, and our current transpiler utilizing COO arrays and \texttt{addMVar}. Section~\ref{sec:results} details these canonical problems, alongside an in-depth case study of a large-scale epidemic model—the specific use case that motivated this framework.
+
+\begin{table}[H]
+\centering
+\caption{Build times for the Supply-Demand problem.
+\texttt{gurobipy-pandas} denotes Claude Code's initial generated implementation using the \texttt{gurobipy-pandas} library; COO+MVar denotes the current Gurobi-native implementation using sparse COO matrices and \texttt{MVar}.}
+\label{tab:supply-demand}
+\begin{tabular}{lrrrrr}
+\toprule
+Size & Variables & Pyomo & Pyomo+Template & gurobipy-pandas & COO+MVar \\
+\midrule
+\(2300^2\) & 5,290,000  & 0.823 & 0.206 & 0.376 & 0.051 \\
+\(3300^2\) & 10,890,000 & 1.955 & 0.410 & 0.766 & 0.107 \\
+\(4700^2\) & 22,090,000 & 6.328 & 0.900 & 1.605 & 0.227 \\
+\(6500^2\) & 42,250,000 & 70.699 & 2.241 & 3.188 & 0.506 \\
+\(9000^2\) & 81,000,000 & TIMEOUT & 9.285 & 6.758 & 1.221 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Build times for the Network Flow problem.}
+\label{tab:network-flow}
+\begin{tabular}{lrrrrr}
+\toprule
+Size & Variables & Pyomo & Pyomo+Template & gurobipy-pandas & COO+MVar \\
+\midrule
+\(n=5000,k=175\)  & 5,250,000  & 1.142 & 0.302 & 0.470 & 0.087 \\
+\(n=7500,k=225\)  & 10,125,000 & 2.340 & 0.602 & 0.900 & 0.166 \\
+\(n=11000,k=285\) & 18,810,000 & 8.707 & 1.272 & 1.741 & 0.322 \\
+\(n=16000,k=360\) & 34,560,000 & 105.128 & 2.886 & 3.581 & 0.701 \\
+\(n=22000,k=430\) & 56,760,000 & TIMEOUT & 5.849 & 6.627 & 1.361 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Build times for the Bill-of-Materials problem.}
+\label{tab:bom}
+\begin{tabular}{lrrrrr}
+\toprule
+Size & Variables & Pyomo & Pyomo+Template & gurobipy-pandas & COO+MVar \\
+\midrule
+\(p=10k,c=20k,t=80\)  & 2,400,000  & 0.774 & 0.172 & 0.176 & 0.053 \\
+\(p=15k,c=30k,t=100\) & 4,500,000  & 1.479 & 0.337 & 0.328 & 0.098 \\
+\(p=22k,c=44k,t=120\) & 7,920,000  & 2.948 & 0.635 & 0.594 & 0.177 \\
+\(p=32k,c=64k,t=150\) & 14,400,000 & 15.080 & 2.439 & 1.181 & 0.351 \\
+\(p=45k,c=90k,t=180\) & 24,300,000 & 116.675 & 2.942 & 2.241 & 0.619 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Contributions} In summary, this paper makes the following contributions:
+\begin{enumerate}
+    \item \textbf{Agent-Generated Transpilation}: We demonstrate that an agentic LLM workflow can successfully construct a deterministic Python transpiler. This artifact bridges the abstraction gap, automatically translating human-readable Pyomo models into Gurobi-native C-API structures to achieve massive build-time speedups.
+    \item \textbf{Data-Parametric Verification}: We formalize a differential testing suite that leverages reduced datasets to strictly verify the transpiler's output against the original Pyomo model. This data-truncated validation mirrors the rigorous vetting workflows standard in national laboratory and industrial settings, showing algorithmic correctness before scaling to full production instances.
+    \item \textbf{A Generalized Software Methodology}: We establish that pairing agent-driven generation with validation provides a blueprint for bridging structural gaps. When a translation is required between any two rigorous representations, an agent can attempt to synthesize the missing bridge. The prerequisite is an independent verification mechanism—whether through data-parametric testing or formal software provers like Rocq—making this methodology applicable across a vast array of computational and engineering domains.
+\end{enumerate}
+
+\section{Background: LLMs in OR and Code Generation}
+
+\paragraph{LLMs in OR.} Recent papers increasingly use LLMs to formulate mixed-integer linear programming problems directly from natural language descriptions. For example, the NL4Opt competition challenged participants to generate intermediate representations of linear programs from text for use by commercial solvers \cite{ramamonjison2023nl4opt}, building on earlier efforts to simplify the OR modeling experience \cite{ramamonjison2022augmenting}. This has spurred the creation of dedicated optimization benchmarks \cite{yang2025optibench} and a variety of generative approaches. Multi-agent frameworks such as OptiMUS \cite{ahmaditeshnizi2024optimus-2, ahmaditeshnizi2024optimus-1} and others \cite{xiao2024chain} parse complex natural language descriptions into programmatic constraints and objectives, while recent training-free architectures like SolverLLM leverage test-time search algorithms to iteratively guess and refine formulations \cite{li2026solverllm}. Due to elevated computational costs and privacy concerns of frontier models, efforts like \cite{huang2025orlm} have even trained open-source LLMs specifically for this task. A related stream of research deploys LLMs as interactive AI assistants to query model states \cite{li2023large} and debug infeasible Pyomo formulations \cite{chen2024diagnosing}. These tools are primarily aimed at making optimization modeling accessible to non-experts, either by generating formulations from natural language or by supporting conversational interaction with existing models. Our focus is different. We assume that the algebraic model itself remains the rigorous source of truth, and ask how developers can preserve that exact, inspectable representation while making model construction and solver interaction substantially faster.
+
+Beyond formulation, recent work has even applied LLMs to the algorithmic solving phase of MILPs \cite{iklassov2024self, sun2026co, ye2025large}, including heuristic tasks such as cold-start cutting plane configuration \cite{lawless2025llms}. These methods operate downstream of model construction and are therefore complementary to our framework.
+
+\paragraph{LLMs in Code Generation and Transpilation.} A more direct antecedent to our work is LLM-assisted code transpilation: translating code from one language or representation into another. Recent systems have used LLMs for verified lifting into domain-specific languages \cite{bhatia2024verified}, C-to-Rust migration with iterative repair \cite{farrukh2026safetrans}, transpilation combined with program repair \cite{ramos2024batfix}, and cross-language translation among general-purpose languages such as C, C++, Java, and Python \cite{rai2024cross}. These works highlight both the promise and the risk of LLM-generated code: the generated artifact can often be useful, but must be checked, repaired, or otherwise validated.
+
+Our work follows this line of thinking in an optimization modeling context, using Pyomo as the reference implementation and Gurobi-native code as the transpilation target. 
+
+Our implementation uses Claude Code (powered by Claude Opus 4.8) as an agentic coding environment. Recent reports suggest that such systems can be effective on compiler-scale software projects. Notably, parallel Claude agents successfully authored a Rust-based C compiler through iterative task selection, testing, and repair \cite{carlini2026compiler}. These long-running agentic workflows excel when grounded in deterministic tests, compact feedback, and rich repository context. In our framework, this context explicitly includes the source code of the Pyomo library itself, which embodies substantial prior work in algebraic modeling. Providing the agent with direct access to Pyomo's internal architecture makes the task more constrained than open-ended generation settings, where the model must invent premises or process steps from ambiguous information \cite{zahavyposition}. Here, the source program already exists, the target API is well defined, and the desired behavior can be checked against Pyomo. The LLM constructs a compiler-like translation path from one exact representation to another.
+
+Beyond benchmarks and context, successful agentic generation relies on human-in-the-loop planning. Anthropic's analysis of Claude Code usage indicates that domain expertise remains critical for specifying architectural objectives and recognizing correct outcomes \cite{anthropic2026expertise}. As detailed in Section~\ref{sec:methods}, our workflow relies on active human prompting to direct the agentic loop. We provide the requisite optimization expertise—both by authoring the canonical Pyomo source models and by continually guiding the agent's objectives—while Claude Code executes the software engineering required to construct and refine the transpiler.
+
+\section{Methods: Agentic Generation of the Transpiler}
+\label{sec:methods}
+
+\section{Computational Results}
+\label{sec:results}
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

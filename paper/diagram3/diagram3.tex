@@ -1,0 +1,74 @@
+\begin{tikzpicture}[
+    % --- STYLES ---
+    base/.style={draw, thick, align=center, minimum height=1cm, minimum width=3cm, font=\sffamily},
+    data/.style={base, trapezium, trapezium left angle=75, trapezium right angle=105, fill=blue!5},
+    source/.style={base, ellipse, fill=blue!5},
+    process/.style={base, rectangle, rounded corners, fill=gray!10},
+    agent/.style={process, fill=purple!15, draw=purple!80!black, thick}, 
+    memory/.style={process, shape=cylinder, aspect=0.25, draw, shape border rotate=90, fill=gray!20, minimum height=1.5cm}, 
+    script/.style={process, fill=blue!10, draw=blue!80!black, thick, minimum width=4cm}, 
+    decision/.style={base, diamond, fill=yellow!15, aspect=2, inner sep=2pt},
+    success/.style={base, rectangle, rounded corners, fill=green!15, draw=green!60!black, thick},
+    container/.style={draw, dashed, rounded corners, inner sep=20pt, fill=gray!5},
+    arrow/.style={->, >=stealth, thick, color=black!80},
+    dashed arrow/.style={->, >=stealth, thick, dashed, color=black!80}
+]
+
+    % ==========================================
+    % RUNTIME TRANSPILATION (Bottom Box)
+    % ==========================================
+    
+    % 1. Core Pipeline
+    \node[script] (transpiler) {Deterministic Python\\Transpiler Script};
+    \node[source, left=2.5cm of transpiler] (code1) {Code \#1:\\New Pyomo instance};
+    \node[source, right=2.5cm of transpiler] (code2) {Code \#2:\\Gurobi-native code};
+    
+    % 2. Testing Layer
+    \node[decision, below=2.5cm of transpiler] (test) {Execute\\Test Suite};
+    \node[data] at (code1 |- test) (data) {User-provided data};
+    
+    % 3. Deployment
+    \node[success, below=2cm of test] (deploy) {Use the code};
+
+    % Runtime Arrows
+    \draw[arrow] (code1) -- node[above, font=\sffamily\small] {Processed by} (transpiler);
+    \draw[arrow] (transpiler) -- node[above, font=\sffamily\small] {Outputs} (code2);
+    
+    \draw[arrow] (code1.south) -- (test.north west);
+    \draw[arrow] (code2.south) -- (test.north east);
+    \draw[arrow] (data.east) -- (test.west);
+    
+    \draw[arrow] (test.south) -- node[right, font=\sffamily\small] {Pass} (deploy.north);
+
+    % ==========================================
+    % AGENTIC GENERATION (Top Box)
+    % ==========================================
+    
+    \node[agent, above=3.5cm of transpiler] (agent) {LLM Agent};
+    \node[memory] at (code1 |- agent) (repo) {Examples/\\Repository};
+    
+    % Agentic Arrows
+    \draw[dashed arrow] (agent.south) -- node[right, font=\sffamily\small] {Generates / Refactors} (transpiler.north);
+    \draw[arrow] (repo.east) -- (agent.west);
+
+    % ==========================================
+    % WIDE FEEDBACK LOOPS
+    % ==========================================
+    
+    % Fail Loop: Out the right side of the test suite decision box
+    \draw[dashed arrow] (test.east) -- ++(9,0) |- node[pos=0.25, right, font=\sffamily\small, align=center] {Fail:\\Send output\\to agent} (agent.east);
+    
+    % Save to Repo Loop: Creates a junction node on the "Pass" line to trigger the save action
+    % Sweeps 7cm to the left, clear of Code 1 and Data, right into the repository
+    \draw[dashed arrow] ($(test.south)!0.5!(deploy.north)$) -| ++(-11,0) |- node[pos=0.25, left, font=\sffamily\small, align=center] {Vetted instance \& code\\saved as dynamic tests\\for the agent} (repo.west);
+
+    % ==========================================
+    % BOUNDING BOXES
+    % ==========================================
+    \begin{scope}[on background layer]
+        \node[container, fit=(agent)(repo), label={[font=\sffamily\bfseries, yshift=2mm]above left:Agentic Generation (Stochastic, resource-heavy)}] (phase1) {};
+        
+        \node[container, fit=(code1)(transpiler)(code2)(data)(test)(deploy), label={[font=\sffamily\bfseries, yshift=2mm]above left:Runtime Transpilation (Deterministic, instantaneous)}] (phase2) {};
+    \end{scope}
+
+\end{tikzpicture}
