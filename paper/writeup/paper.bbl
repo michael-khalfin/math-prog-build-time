@@ -37,6 +37,11 @@ Hao Chen, Gonzalo~E Constante-Flores, and Can Li.
 \newblock Diagnosing infeasible optimization problems using large language models.
 \newblock {\em INFOR: Information Systems and Operational Research}, 62(4):573--587, 2024.
 
+\bibitem{cheng2026apeiron}
+Junyan Cheng, Ankit Srivastava, Jessie Zeng, Milenko Drinic, and Jack~W Stokes.
+\newblock Apeiron: A scalable llm-agentic framework for autonomous full-lifecycle demand-optimized application synthesis.
+\newblock In {\em Findings of the Association for Computational Linguistics: ACL 2026}, pages 3868--3899, 2026.
+
 \bibitem{farrukh2026safetrans}
 Muhammad Farrukh, Baris Coskun, Tapti Palit, and Michalis Polychronakis.
 \newblock Safetrans: Llm-assisted transpilation from c to rust.

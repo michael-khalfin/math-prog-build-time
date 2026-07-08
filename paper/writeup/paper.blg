@@ -5,45 +5,45 @@ The style file: plain.bst
 Database file #1: references.bib
 Warning--can't use both volume and number fields in bynum2021pyomo
 Warning--can't use both volume and number fields in sun2026co
-You've used 24 entries,
+You've used 25 entries,
             2118 wiz_defined-function locations,
-            631 strings with 9690 characters,
-and the built_in function-call counts, 11060 in all, are:
-= -- 1045
-> -- 704
-< -- 12
-+ -- 279
-- -- 254
-* -- 866
-:= -- 1803
-add.period$ -- 77
-call.type$ -- 24
-change.case$ -- 195
+            636 strings with 9984 characters,
+and the built_in function-call counts, 11642 in all, are:
+= -- 1103
+> -- 732
+< -- 13
++ -- 290
+- -- 264
+* -- 905
+:= -- 1885
+add.period$ -- 80
+call.type$ -- 25
+change.case$ -- 203
 chr.to.int$ -- 0
-cite$ -- 26
-duplicate$ -- 362
-empty$ -- 737
-format.name$ -- 254
-if$ -- 2283
+cite$ -- 27
+duplicate$ -- 387
+empty$ -- 781
+format.name$ -- 264
+if$ -- 2414
 int.to.chr$ -- 0
-int.to.str$ -- 24
-missing$ -- 23
-newline$ -- 125
-num.names$ -- 48
-pop$ -- 218
+int.to.str$ -- 25
+missing$ -- 24
+newline$ -- 130
+num.names$ -- 50
+pop$ -- 229
 preamble$ -- 1
-purify$ -- 172
+purify$ -- 179
 quote$ -- 0
-skip$ -- 279
+skip$ -- 302
 stack$ -- 0
-substring$ -- 640
-swap$ -- 118
-text.length$ -- 12
+substring$ -- 685
+swap$ -- 131
+text.length$ -- 13
 text.prefix$ -- 0
 top$ -- 0
-type$ -- 94
+type$ -- 98
 warning$ -- 2
-while$ -- 88
-width$ -- 26
-write$ -- 269
+while$ -- 93
+width$ -- 27
+write$ -- 280
 (There were 2 warnings)

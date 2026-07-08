@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.22)  8 JUL 2026 13:35
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.22)  8 JUL 2026 13:52
 entering extended mode
  \write18 enabled.
  file:line:error style messages enabled.
@@ -684,10 +684,10 @@ Package hyperref Info: Link coloring OFF on input line 35.
 \pydata@fh@0=\write6
 \openout6 = `_7E3F660480AB1640DE8024C200B5A4D3.data.minted'.
 
-runsystem(latexminted config  --timestamp 20260708133515 7E3F660480AB1640DE8024C200B5A4D3)...executed.
+runsystem(latexminted config  --timestamp 20260708135204 7E3F660480AB1640DE8024C200B5A4D3)...executed.
 
  (./_7E3F660480AB1640DE8024C200B5A4D3.config.minted)
-runsystem(latexminted cleanconfig  --timestamp 20260708133515 7E3F660480AB1640DE8024C200B5A4D3)...executed.
+runsystem(latexminted cleanconfig  --timestamp 20260708135204 7E3F660480AB1640DE8024C200B5A4D3)...executed.
 
  (./_minted/default.style.minted) (./_minted/80CAA1DDD190025E1D1CF93A1E5D85BC.highlight.minted
 LaTeX Font Info:    Font shape `OT1/cmtt/bx/n' in size <10> not available
@@ -726,18 +726,18 @@ Package rerunfilecheck Info: File `paper.out' has not changed.
 (rerunfilecheck)             Checksum: 9FC044E9A5FE7033CFD3EEE682D7F94A;2381.
  ) 
 Here is how much of TeX's memory you used:
- 27570 strings out of 467525
- 561501 string characters out of 5418982
- 1155086 words of memory out of 5000000
- 55927 multiletter control sequences out of 15000+600000
+ 27572 strings out of 467525
+ 561540 string characters out of 5418982
+ 1155125 words of memory out of 5000000
+ 55928 multiletter control sequences out of 15000+600000
  637776 words of font info for 79 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
  88i,12n,104p,1919b,1051s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx12.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx9.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmex10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cmextra/cmex9.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi6.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi7.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi9.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr17.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr5.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr6.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr7.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr8.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr9.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmss10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmss9.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmssbx10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy5.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy6.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy7.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy9.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmti10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmtt10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmtt9.pfb>
-Output written on paper.pdf (14 pages, 407084 bytes).
+Output written on paper.pdf (14 pages, 407647 bytes).
 PDF statistics:
- 396 PDF objects out of 1000 (max. 8388607)
- 320 compressed objects within 4 object streams
- 78 named destinations out of 1000 (max. 500000)
+ 399 PDF objects out of 1000 (max. 8388607)
+ 323 compressed objects within 4 object streams
+ 79 named destinations out of 1000 (max. 500000)
  109 words of extra memory for PDF output out of 10000 (max. 10000000)
 
