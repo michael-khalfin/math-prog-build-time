@@ -1,0 +1,120 @@
+\begin{thebibliography}{10}
+
+\bibitem{ahmaditeshnizi2024optimus-2}
+Ali AhmadiTeshnizi, Wenzhi Gao, Herman Brunborg, Shayan Talaei, Connor Lawless, and Madeleine Udell.
+\newblock Optimus-0.3: Using large language models to model and solve optimization problems at scale.
+\newblock {\em arXiv preprint arXiv:2407.19633}, 2024.
+
+\bibitem{ahmaditeshnizi2024optimus-1}
+Ali AhmadiTeshnizi, Wenzhi Gao, and Madeleine Udell.
+\newblock Optimus: Scalable optimization modeling with (mi) lp solvers and large language models.
+\newblock {\em arXiv preprint arXiv:2402.10172}, 2024.
+
+\bibitem{anthropic2026expertise}
+{Anthropic}.
+\newblock Agentic coding and persistent returns to expertise.
+\newblock \url{https://www.anthropic.com/research/claude-code-expertise}, June 2026.
+\newblock Accessed: 2026-07-06.
+
+\bibitem{bhatia2024verified}
+Sahil Bhatia, Jie Qiu, Niranjan Hasabnis, Sanjit~A Seshia, and Alvin Cheung.
+\newblock Verified code transpilation with llms.
+\newblock {\em Advances in Neural Information Processing Systems}, 37:41394--41424, 2024.
+
+\bibitem{bynum2021pyomo}
+Michael~L Bynum, Gabriel~A Hackebeil, William~E Hart, Carl~D Laird, Bethany~L Nicholson, John~D Siirola, Jean-Paul Watson, David~L Woodruff, et~al.
+\newblock {\em Pyomo-optimization modeling in python}, volume~67.
+\newblock Springer, 2021.
+
+\bibitem{carlini2026compiler}
+Nicholas Carlini.
+\newblock Building a c compiler with a team of parallel claudes.
+\newblock \url{https://www.anthropic.com/engineering/building-c-compiler}, February 2026.
+\newblock Accessed: 2026-07-06.
+
+\bibitem{chen2024diagnosing}
+Hao Chen, Gonzalo~E Constante-Flores, and Can Li.
+\newblock Diagnosing infeasible optimization problems using large language models.
+\newblock {\em INFOR: Information Systems and Operational Research}, 62(4):573--587, 2024.
+
+\bibitem{farrukh2026safetrans}
+Muhammad Farrukh, Baris Coskun, Tapti Palit, and Michalis Polychronakis.
+\newblock Safetrans: Llm-assisted transpilation from c to rust.
+\newblock In {\em Proceedings of the 1st Workshop on Code Translation, Transformation, and Modernization}, pages 30--37, 2026.
+
+\bibitem{hart2011pyomo}
+William~E Hart, Jean-Paul Watson, and David~L Woodruff.
+\newblock Pyomo: modeling and solving mathematical programs in python.
+\newblock {\em Mathematical Programming Computation}, 3(3):219--260, 2011.
+
+\bibitem{huang2025orlm}
+Chenyu Huang, Zhengyang Tang, Shixi Hu, Ruoqing Jiang, Xin Zheng, Dongdong Ge, Benyou Wang, and Zizhuo Wang.
+\newblock {ORLM}: A customizable framework in training large models for automated optimization modeling.
+\newblock {\em Operations Research}, 73(6):2986--3009, November 2025.
+
+\bibitem{iklassov2024self}
+Zangir Iklassov, Yali Du, Farkhad Akimov, and Martin Tak{\'a}{\v{c}}.
+\newblock Self-guiding exploration for combinatorial problems.
+\newblock {\em Advances in Neural Information Processing Systems}, 37:130569--130601, 2024.
+
+\bibitem{lawless2025llms}
+Connor Lawless, Yingxi Li, Anders Wikum, Madeleine Udell, and Ellen Vitercik.
+\newblock Llms for cold-start cutting plane separator configuration.
+\newblock In {\em International Conference on the Integration of Constraint Programming, Artificial Intelligence, and Operations Research}, pages 51--69. Springer, 2025.
+
+\bibitem{li2023large}
+Beibin Li, Konstantina Mellou, Bo~Zhang, Jeevan Pathuri, and Ishai Menache.
+\newblock Large language models for supply chain optimization.
+\newblock {\em arXiv preprint arXiv:2307.03875}, 2023.
+
+\bibitem{li2026solverllm}
+Dong Li, Xujiang Zhao, Linlin Yu, Yanchi Liu, Wei Cheng, Zhengzhang Chen, Zhong Chen, Feng Chen, Chen Zhao, and Haifeng Chen.
+\newblock Solverllm: Leveraging test-time scaling for optimization problem via llm-guided search.
+\newblock {\em Advances in Neural Information Processing Systems}, 38:100028--100058, 2026.
+
+\bibitem{rai2024cross}
+Laxmisha Rai, Smriti Khatiwada, Chunrao Deng, and Fasheng Liu.
+\newblock Cross-language code development with generative ai: A source-to-source translation perspective.
+\newblock In {\em 2024 IEEE 7th International Conference on Electronic Information and Communication Technology (ICEICT)}, pages 562--565. IEEE, 2024.
+
+\bibitem{ramamonjison2022augmenting}
+Rindra Ramamonjison, Haley Li, Timothy Yu, Shiqi He, Vishnu Rengan, Amin Banitalebi-Dehkordi, Zirui Zhou, and Yong Zhang.
+\newblock Augmenting operations research with auto-formulation of optimization models from problem descriptions.
+\newblock In {\em Proceedings of the 2022 Conference on Empirical Methods in Natural Language Processing: Industry Track}, pages 29--62, 2022.
+
+\bibitem{ramamonjison2023nl4opt}
+Rindranirina Ramamonjison, Timothy Yu, Raymond Li, Haley Li, Giuseppe Carenini, Bissan Ghaddar, Shiqi He, Mahdi Mostajabdaveh, Amin Banitalebi-Dehkordi, Zirui Zhou, et~al.
+\newblock Nl4opt competition: Formulating optimization problems based on their natural language descriptions.
+\newblock In {\em NeurIPS 2022 competition track}, pages 189--203. PMLR, 2023.
+
+\bibitem{ramos2024batfix}
+Daniel Ramos, In{\^e}s Lynce, Vasco Manquinho, Ruben Martins, and Claire Le~Goues.
+\newblock Batfix: Repairing language model-based transpilation.
+\newblock {\em ACM Transactions on Software Engineering and Methodology}, 33(6):1--29, 2024.
+
+\bibitem{sun2026co}
+Weiwei Sun, Shengyu Feng, Shanda Li, and Yiming Yang.
+\newblock Co-bench: Benchmarking language model agents in algorithm search for combinatorial optimization.
+\newblock In {\em Proceedings of the AAAI Conference on Artificial Intelligence}, volume~40, pages 33126--33134, 2026.
+
+\bibitem{xiao2024chain}
+Ziyang Xiao, Dongxiang Zhang, Yangjun Wu, Lilin Xu, Yuan Wang, Xiongwei Han, Xiaojin Fu, Tao Zhong, Jia Zeng, Mingli Song, et~al.
+\newblock Chain-of-experts: When llms meet complex operations research problems.
+\newblock In {\em International Conference on Learning Representations}, volume 2024, pages 48519--48537, 2024.
+
+\bibitem{yang2025optibench}
+Zhicheng Yang, Yiwei Wang, Yinya Huang, Zhijiang Guo, Shi Shi, Xiongwei Han, Liang Feng, Linqi Song, Xiaodan Liang, and Jing Tang.
+\newblock Optibench meets resocratic: Measure and improve llms for optimization modeling.
+\newblock In {\em International Conference on Learning Representations}, volume 2025, pages 24726--24759, 2025.
+
+\bibitem{ye2025large}
+Huigen Ye, Hua Xu, An~Yan, and Yaoyang Cheng.
+\newblock Large language model-driven large neighborhood search for large-scale milp problems.
+\newblock In {\em Forty-second International Conference on Machine Learning}, 2025.
+
+\bibitem{zahavyposition}
+Tom Zahavy.
+\newblock Position: Llms can't jump.
+\newblock In {\em Forty-third International Conference on Machine Learning Position Paper Track}, 2026.
+
+\end{thebibliography}

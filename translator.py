@@ -35,7 +35,9 @@ class SetInfo:
 class VarInfo:
     pyomo_name: str
     index_sets: list                # ordered Pyomo set names
-    vtype: str = 'CONTINUOUS'       # 'CONTINUOUS' | 'INTEGER'
+    vtype: str = 'CONTINUOUS'       # 'CONTINUOUS' | 'INTEGER' | 'BINARY'
+    lb: object = None               # explicit lower bound from bounds=(lb, ub); None = default
+    ub: object = None               # explicit upper bound from bounds=(lb, ub); None = +inf
 
 
 @dataclass
@@ -332,7 +334,21 @@ class _Translator:
                 elif 'Binary' in d:
                     vtype = 'BINARY'
 
-        self.vars[name] = VarInfo(pyomo_name=name, index_sets=index_sets, vtype=vtype)
+        # bounds=(lb, ub) -- a two-element tuple of numeric constants or None.
+        lb = ub = None
+        bounds_kw = _extract_keyword(call, 'bounds')
+        if isinstance(bounds_kw, ast.Tuple) and len(bounds_kw.elts) == 2:
+            def _const(node):
+                if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+                    return float(node.value)
+                if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub) \
+                        and isinstance(node.operand, ast.Constant):
+                    return -float(node.operand.value)
+                return None   # None literal or non-constant -> use solver default
+            lb, ub = _const(bounds_kw.elts[0]), _const(bounds_kw.elts[1])
+
+        self.vars[name] = VarInfo(pyomo_name=name, index_sets=index_sets, vtype=vtype,
+                                  lb=lb, ub=ub)
         self._var_order.append(name)
 
     def _parse_constraint(self, name: str, call: ast.Call):
@@ -974,12 +990,18 @@ class _CodeGen:
                 )
                 self._emit(f"{idx_var} = pd.MultiIndex.from_product([{sets_repr}], names=[{names_repr}])")
 
+        # Lower/upper bounds: an explicit bounds=(lb, ub) overrides the domain
+        # default (lb=0 for NonNegative*).  A None bound keeps the solver default
+        # (lb 0.0, ub +inf).  Binary vars are already {0,1}; only honor bounds if
+        # given (rare, but harmless).
+        lb_repr = f"{vi.lb!r}" if vi.lb is not None else "0.0"
+        ub_part = f", ub={vi.ub!r}" if vi.ub is not None else ""
         if vi.vtype == 'BINARY':
             self._emit(f"{var_obj} = m.addMVar(len({idx_var}), vtype=gp.GRB.BINARY, name='{vi.pyomo_name}')")
         elif vi.vtype == 'INTEGER':
-            self._emit(f"{var_obj} = m.addMVar(len({idx_var}), lb=0.0, vtype=gp.GRB.INTEGER, name='{vi.pyomo_name}')")
+            self._emit(f"{var_obj} = m.addMVar(len({idx_var}), lb={lb_repr}{ub_part}, vtype=gp.GRB.INTEGER, name='{vi.pyomo_name}')")
         else:
-            self._emit(f"{var_obj} = m.addMVar(len({idx_var}), lb=0.0, name='{vi.pyomo_name}')")
+            self._emit(f"{var_obj} = m.addMVar(len({idx_var}), lb={lb_repr}{ub_part}, name='{vi.pyomo_name}')")
 
         self._emit(f"{flat_var} = pd.DataFrame({{'_col': np.arange(len({idx_var}))}}, index={idx_var}).reset_index()")
         self._emit(f"m._mvars['{vi.pyomo_name}'] = {var_obj}")
