@@ -1,49 +1,49 @@
-This is BibTeX, Version 0.99d (TeX Live 2025)
+This is BibTeX, Version 0.99e (TeX Live 2026)
 Capacity: max_strings=200000, hash_size=200000, hash_prime=170003
 The top-level auxiliary file: paper.aux
 The style file: plain.bst
 Database file #1: references.bib
 Warning--can't use both volume and number fields in bynum2021pyomo
 Warning--can't use both volume and number fields in sun2026co
-You've used 23 entries,
+You've used 24 entries,
             2118 wiz_defined-function locations,
-            624 strings with 9506 characters,
-and the built_in function-call counts, 10743 in all, are:
-= -- 1012
-> -- 691
+            631 strings with 9690 characters,
+and the built_in function-call counts, 11060 in all, are:
+= -- 1045
+> -- 704
 < -- 12
-+ -- 273
-- -- 250
-* -- 842
-:= -- 1750
-add.period$ -- 74
-call.type$ -- 23
-change.case$ -- 190
++ -- 279
+- -- 254
+* -- 866
+:= -- 1803
+add.period$ -- 77
+call.type$ -- 24
+change.case$ -- 195
 chr.to.int$ -- 0
-cite$ -- 25
-duplicate$ -- 351
-empty$ -- 712
-format.name$ -- 250
-if$ -- 2219
+cite$ -- 26
+duplicate$ -- 362
+empty$ -- 737
+format.name$ -- 254
+if$ -- 2283
 int.to.chr$ -- 0
-int.to.str$ -- 23
-missing$ -- 22
-newline$ -- 120
-num.names$ -- 46
-pop$ -- 215
+int.to.str$ -- 24
+missing$ -- 23
+newline$ -- 125
+num.names$ -- 48
+pop$ -- 218
 preamble$ -- 1
-purify$ -- 168
+purify$ -- 172
 quote$ -- 0
-skip$ -- 271
+skip$ -- 279
 stack$ -- 0
-substring$ -- 615
-swap$ -- 117
+substring$ -- 640
+swap$ -- 118
 text.length$ -- 12
 text.prefix$ -- 0
 top$ -- 0
-type$ -- 90
+type$ -- 94
 warning$ -- 2
-while$ -- 84
-width$ -- 25
-write$ -- 258
+while$ -- 88
+width$ -- 26
+write$ -- 269
 (There were 2 warnings)

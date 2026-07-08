@@ -97,6 +97,11 @@ Weiwei Sun, Shengyu Feng, Shanda Li, and Yiming Yang.
 \newblock Co-bench: Benchmarking language model agents in algorithm search for combinatorial optimization.
 \newblock In {\em Proceedings of the AAAI Conference on Artificial Intelligence}, volume~40, pages 33126--33134, 2026.
 
+\bibitem{weisfeiler1968reduction}
+Boris Weisfeiler and Andrei Leman.
+\newblock The reduction of a graph to canonical form and the algebra which appears therein.
+\newblock {\em Nauchno-Technicheskaya Informatsiya}, 2(9):12--16, 1968.
+
 \bibitem{xiao2024chain}
 Ziyang Xiao, Dongxiang Zhang, Yangjun Wu, Lilin Xu, Yuan Wang, Xiongwei Han, Xiaojin Fu, Tao Zhong, Jia Zeng, Mingli Song, et~al.
 \newblock Chain-of-experts: When llms meet complex operations research problems.

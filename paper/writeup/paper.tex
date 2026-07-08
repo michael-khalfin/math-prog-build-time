@@ -121,65 +121,14 @@ Its outputs are vetted by differential testing. For a given formulation, both th
 
 This approach provides a different trust model from much of the recent literature on LLMs for optimization. Rather than treating the LLM as a black-box optimizer or an oracle for formulation quality, we deploy it to produce an intermediate software artifact whose behavior can be validated and iteratively repaired. Failed tests are returned to the agent, while passing cases are retained as regression tests. Although we focus on Pyomo-to-Gurobi transpilation, the methodology generalizes across the modeling ecosystem: LLM-assisted transpilers can translate between any AMLs, solver APIs, or optimization transformations. More broadly, this pattern of data-parametric validation applies whenever a trusted reference implementation exists and is highly dependent on input data. By validating equivalence on reduced instances, developers can confidently deploy deterministic, agent-generated code at scale.
 
-To demonstrate the efficacy of this approach, we preview the build times for three canonical models in \autoref{tab:supply-demand}, \autoref{tab:network-flow}, and \autoref{tab:bom}. These tables compare standard Pyomo, Pyomo-templatization, an early transpiler version using \texttt{gurobipy-pandas}, and our current transpiler utilizing COO arrays and \texttt{addMVar}. Section~\ref{sec:results} details these canonical problems, alongside an in-depth case study of a large-scale epidemic model—the specific use case that motivated this framework.
-
-\begin{table}[H]
-\centering
-\caption{Build times for the Supply-Demand problem.
-\texttt{gurobipy-pandas} denotes Claude Code's initial generated implementation using the \texttt{gurobipy-pandas} library; COO+MVar denotes the current Gurobi-native implementation using sparse COO matrices and \texttt{MVar}.}
-\label{tab:supply-demand}
-\begin{tabular}{lrrrrr}
-\toprule
-Size & Variables & Pyomo & Pyomo+Template & gurobipy-pandas & COO+MVar \\
-\midrule
-\(2300^2\) & 5,290,000  & 0.823 & 0.206 & 0.376 & 0.051 \\
-\(3300^2\) & 10,890,000 & 1.955 & 0.410 & 0.766 & 0.107 \\
-\(4700^2\) & 22,090,000 & 6.328 & 0.900 & 1.605 & 0.227 \\
-\(6500^2\) & 42,250,000 & 70.699 & 2.241 & 3.188 & 0.506 \\
-\(9000^2\) & 81,000,000 & TIMEOUT & 9.285 & 6.758 & 1.221 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{table}[H]
-\centering
-\caption{Build times for the Network Flow problem.}
-\label{tab:network-flow}
-\begin{tabular}{lrrrrr}
-\toprule
-Size & Variables & Pyomo & Pyomo+Template & gurobipy-pandas & COO+MVar \\
-\midrule
-\(n=5000,k=175\)  & 5,250,000  & 1.142 & 0.302 & 0.470 & 0.087 \\
-\(n=7500,k=225\)  & 10,125,000 & 2.340 & 0.602 & 0.900 & 0.166 \\
-\(n=11000,k=285\) & 18,810,000 & 8.707 & 1.272 & 1.741 & 0.322 \\
-\(n=16000,k=360\) & 34,560,000 & 105.128 & 2.886 & 3.581 & 0.701 \\
-\(n=22000,k=430\) & 56,760,000 & TIMEOUT & 5.849 & 6.627 & 1.361 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{table}[H]
-\centering
-\caption{Build times for the Bill-of-Materials problem.}
-\label{tab:bom}
-\begin{tabular}{lrrrrr}
-\toprule
-Size & Variables & Pyomo & Pyomo+Template & gurobipy-pandas & COO+MVar \\
-\midrule
-\(p=10k,c=20k,t=80\)  & 2,400,000  & 0.774 & 0.172 & 0.176 & 0.053 \\
-\(p=15k,c=30k,t=100\) & 4,500,000  & 1.479 & 0.337 & 0.328 & 0.098 \\
-\(p=22k,c=44k,t=120\) & 7,920,000  & 2.948 & 0.635 & 0.594 & 0.177 \\
-\(p=32k,c=64k,t=150\) & 14,400,000 & 15.080 & 2.439 & 1.181 & 0.351 \\
-\(p=45k,c=90k,t=180\) & 24,300,000 & 116.675 & 2.942 & 2.241 & 0.619 \\
-\bottomrule
-\end{tabular}
-\end{table}
+To demonstrate the efficacy of this approach, we highlight the build-time speedups achieved across three canonical models. As detailed later in Section~\ref{sec:results} \autoref{tab:supply-demand}, \autoref{tab:network-flow}, and \autoref{tab:bom}, the transpiler reduces construction times by orders of magnitude compared to standard Pyomo pipelines. Section~\ref{sec:results} formally benchmarks these canonical problems before presenting an in-depth case study of a large-scale epidemic model—the specific, real-world use case that motivated this framework.
 
 \paragraph{Contributions} In summary, this paper makes the following contributions:
 \begin{enumerate}
     \item \textbf{Agent-Generated Transpilation}: We demonstrate that an agentic LLM workflow can successfully construct a deterministic Python transpiler. This artifact bridges the abstraction gap, automatically translating human-readable Pyomo models into Gurobi-native C-API structures to achieve massive build-time speedups.
     \item \textbf{Data-Parametric Verification}: We formalize a differential testing suite that leverages reduced datasets to strictly verify the transpiler's output against the original Pyomo model. This data-truncated validation mirrors the rigorous vetting workflows standard in national laboratory and industrial settings, showing algorithmic correctness before scaling to full production instances.
-    \item \textbf{A Generalized Software Methodology}: We establish that pairing agent-driven generation with validation provides a blueprint for bridging structural gaps. When a translation is required between any two rigorous representations, an agent can attempt to synthesize the missing bridge. The prerequisite is an independent verification mechanism—whether through data-parametric testing or formal software provers like Rocq—making this methodology applicable across a vast array of computational and engineering domains.
+    \item \textbf{The Oracle-Sandbox (OS) Methodology}: We formalize a generalized blueprint for bridging structural software gaps. In this paradigm, a stochastic agent is permitted to freely synthesize and iterate code (the \emph{sandbox}), provided its outputs are strictly bounded by an independent verification mechanism (the \emph{oracle}). The verification mechanism can be data-parametric testing, as used for our transpiler, or formal software provers like Rocq. This framework effectively functions as an operating system for natural-language programming: human intent (English) is ``compiled'' into deterministic software, with the oracle ensuring the correctness of the underlying implementation.
+    We establish that this pairing of agent-driven generation with validation is particularly powerful for translation tasks. When a translation is required between any two rigorous representations, an agent can safely attempt to synthesize the missing bridge. We think that this methodology is applicable across a vast array of computational and engineering domains.
 \end{enumerate}
 
 \section{Background: LLMs in OR and Code Generation}
@@ -233,16 +182,16 @@ One property of this setup separates it from open-ended code generation: both en
 \subsection{Verification by Differential Testing}
 \label{sec:methods-verify}
 
-The transpiler is trusted only because each model it emits is checked against Pyomo. Establishing that two Gurobi models coincide is subtler than a field-by-field comparison: the pipelines emit variables and constraints in different orders and under different names, so equality holds only up to a permutation of rows and columns. Cast each model as the bipartite incidence graph between its variables and its constraints---an edge, weighted by the coefficient $a_{uv}$, wherever variable $v$ appears in constraint $u$---and the two models agree exactly when these labelled graphs are isomorphic.
+The transpiler is trusted only because each model it emits is checked against Pyomo every time. Establishing that two Gurobi models coincide is subtler than a field-by-field comparison: the pipelines emit variables and constraints in different orders and under different names, so equality holds only up to a permutation of rows and columns. Cast each model as the bipartite incidence graph between its variables and its constraints---an edge, weighted by the coefficient $a_{uv}$, wherever variable $v$ appears in constraint $u$---and the two models agree exactly when these labelled graphs are isomorphic.
 
 We test this isomorphism efficiently by computing a permutation-invariant \emph{signature} in two layers (\autoref{tab:signature}). The first layer deals with both nodes and edges, but ignores how they connect. It consists of order-independent multisets, such as global counts, coefficient values, variable bounds, and right-hand sides. A mismatch at this layer instantly flags a defect and isolates the specific parameter that the transpiler mishandled. However, these summaries cannot detect incidence errors, such as a correct coefficient being assigned to the wrong variable.
 
-To capture this incidence structure, the second layer applies \emph{color refinement} (the 1-dimensional Weisfeiler-Leman algorithm). Each node is initialized with a ``color'' (a hash) encoding its intrinsic properties: a variable's bounds, type, and objective coefficient; or a constraint's sense and right-hand side. In each iteration $t$, every node is recolored by hashing its current color with the multiset of its neighbors' colors and the connecting edge weights (the constraint coefficients $a_{uv}$):
+To capture this incidence structure, the second layer applies \emph{color refinement} \cite{weisfeiler1968reduction} (the 1-dimensional Weisfeiler-Leman algorithm). Each node is initialized with a ``color'' (a hash) encoding its intrinsic properties: a variable's bounds, type, and objective coefficient; or a constraint's sense and right-hand side. In each iteration $t$, every node is recolored by hashing its current color with the multiset of its neighbors' colors and the connecting edge weights (the constraint coefficients $a_{uv}$):
 \begin{equation}
 c_{t+1}(v) \;=\; \mathrm{hash}\!\Big( c_t(v),\; \big\{\, (c_t(u),\, a_{uv}) : u \in N(v) \,\big\} \Big),
 \label{eq:wl}
 \end{equation}
-Here, $\operatorname{hash}(\cdot)$ denotes a deterministic, collision-resistant mapping (e.g., SHA-256) that assigns a uniquely identifiable integer to each distinct input state. The process repeats until the color distribution stabilizes. Structurally interchangeable nodes converge to a common color, and the final histogram of colors perfectly characterizes the incidence graph. Two models are declared structurally equivalent only if both layers of their signatures match exactly.
+Here, $\operatorname{hash}(\cdot)$ denotes a deterministic, collision-resistant mapping that assigns a uniquely identifiable integer to each distinct input state. The process repeats until the color distribution stabilizes. Structurally interchangeable nodes converge to a common color, and the final histogram of colors perfectly characterizes the incidence graph. Two models are declared structurally equivalent only if both layers of their signatures match exactly.
 
 \begin{table}[ht]
 \centering
@@ -253,36 +202,36 @@ Here, $\operatorname{hash}(\cdot)$ denotes a deterministic, collision-resistant 
 \toprule
 \textbf{Signature component} & \textbf{Discrepancy it detects} \\
 \midrule
-Counts $(V, C, \mathrm{nnz})$ & missing or extra variable, constraint, or term \\
-Coefficient multiset & wrong constraint coefficient \\
-Right-hand-side multiset & wrong right-hand side \\
-Objective-coefficient multiset & wrong objective weight \\
-Bound/type multiset $(\ell, u, \tau)$ & wrong variable bound or domain \\
+Counts $(V, C, \mathrm{nnz})$ & Missing or extra variable, constraint, or term \\
+Coefficient multiset & Wrong constraint coefficient \\
+Right-hand-side multiset & Wrong right-hand side \\
+Objective-coefficient multiset & Wrong objective weight \\
+Bound/type multiset $(\ell, u, \tau)$ & Wrong variable bound or domain \\
 \midrule
-Colour-refinement histogram, Eq.~\eqref{eq:wl} & wrong incidence: which variables enter which constraints \\
+Color-refinement histogram, Eq.~\eqref{eq:wl} & Wrong incidence: which variables enter which constraints \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Two conventions are folded out so that equivalent models are not flagged. An equality row and its negation state the same constraint, so each equality is encoded by the \emph{unordered} pair of its positive- and negative-coefficient sides, which negation merely swaps. And a right-hand side of $-0.0$, which the transpiler's arithmetic can yield where Pyomo yields $0.0$, is normalized before hashing.
+To prevent false negatives, the signature normalizes two common algebraic symmetries. First, an equality row and its negation state (e.g., $a^\top x=b$ versus $-a^\top x=-b$) state the identical constraint. Each equality is therefore encoded as the \emph{unordered} pair of its positive and negative evluations, ensuring that arbitrary negations hash to the same value. Second, floating-point artifacts such as a $-0.0$ right-hand side---which the transpiler's low-level arithmetic can occasionally yield where Pyomo yields $0.0$---are strictly normalized before hashing.
 
-Because the data is an argument to the model function, the check runs on \emph{reduced} instances that retain the index structure but shrink every set, so Pyomo instantiates them in milliseconds. We test each benchmark model at several sizes and three seeds---thirty instances---together with twenty-one formulations that each isolate one modeling feature. As the transpiler is deterministic, code certified on these instances is exactly the code that runs at scale.
+Because the dataset is explicitly passed to the model function, this verification is executed on \emph{reduced} instances. These instances preserve the exact indexing logic of the full problem but drastically shrink the domain sets, allowing Pyomo to instantiate the reference graph in milliseconds. We test each benchmark model at several sizes and three seeds---thirty instances---together with twenty-one formulations that each isolate one modeling feature. As the transpiler is deterministic, code certified on these instances is exactly the code that runs at full scale.
 
-A check that cannot fail certifies nothing, so we confirm the signature detects deliberate corruptions of a correct model (\autoref{tab:controls}); the count-only comparison misses three of the four. This sensitivity is what exposed the omitted upper bound of Section~\ref{sec:results-verify}, which left every count unchanged. In the loop, a failing signature names the differing component---localized feedback for repair---and each newly passing model is retained as a regression, so the certified class grows monotonically.
+To ensure the signature is robust, we confirmed its sensitivity against deliberate, microscopic corruptions of a correct model (\autoref{tab:controls}). During the agentic loop, a failing signature immediately isolates the mismatched component, providing localized feedback for the LLM's repair cycle. Once a generated model passes, it is permanently retained as a regression test, ensuring the transpiler's capabilities grow monotonically.
 
 \begin{table}[ht]
 \centering
-\caption{Negative controls. Each corruption of a correct model must change the signature; comparing variable and constraint counts alone---the naive check---misses three of the four.}
+\caption{Negative controls. Each corruption of a correct model changes the signature. Comparing variable and constraint counts alone misses three of the four.}
 \label{tab:controls}
 \small
 \begin{tabular}{@{}p{0.40\textwidth}p{0.36\textwidth}p{0.15\textwidth}@{}}
 \toprule
 \textbf{Corruption} & \textbf{First flagged by} & \textbf{Counts alone?} \\
 \midrule
-Remove a constraint & counts $(C, \mathrm{nnz})$ & yes \\
-Tighten a variable bound & bound multiset & no \\
-Perturb one coefficient & coefficient multiset, colours & no \\
-Alter an objective coefficient & objective multiset & no \\
+Remove a constraint & Counts $(C, \mathrm{nnz})$ & Yes \\
+Tighten a variable bound & Bound multiset & No \\
+Perturb one coefficient & Coefficient multiset, colors & No \\
+Alter an objective coefficient & Objective multiset & No \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -290,8 +239,7 @@ Alter an objective coefficient & objective multiset & no \\
 \subsection{The Transpiler}
 \label{sec:methods-transpiler}
 
-The transpiler is a deterministic compiler from a Pyomo model function to the source of an equivalent Gurobi builder. It never executes Pyomo: it reads the function as text, so none of Pyomo's construction cost is paid. Its stages mirror a compiler---parse, classify, reconcile indices, generate (\autoref{fig:pipeline})---and only classification embeds modeling knowledge.
-
+The transpiler operates as a deterministic static compiler. Rather than executing the Pyomo model and paying the overhead of instantiation, it parses the Python source code directly into an Abstract Syntax Tree (AST). The transpiler then translates this AST into an equivalent, high-performance Gurobi builder script. As illustrated in \autoref{fig:pipeline}, the pipeline mirrors traditional compiler architecture—parse, classify, reconcile indices, and generate. The parsing and generation phases are purely mechanical. Only the classification stage embeds domain-specific mathematical modeling knowledge.
 \begin{figure}[ht]
 \centering
 \resizebox{\textwidth}{!}{%
@@ -306,31 +254,39 @@ The transpiler is a deterministic compiler from a Pyomo model function to the so
 \draw[arr] (dec) -- node[above, font=\scriptsize]{classify} (pat);
 \draw[arr] (pat) -- node[above, font=\scriptsize]{generate} (gen);
 \end{tikzpicture}}
-\caption{The transpiler as a compiler. Only the \emph{classify} stage embeds modeling knowledge---the catalog of constraint shapes in \autoref{tab:patterns}; parsing and code generation are mechanical. The output is Gurobi-native source, never an instantiated Pyomo model.}
+\caption{The transpiler as a compiler. Only the \emph{classify} stage embeds modeling knowledge: the catalog of constraint shapes in \autoref{tab:patterns}. The output is Gurobi-native source.}
 \label{fig:pipeline}
 \end{figure}
 
-\paragraph{Where the work runs.} The speedup is a matter of \emph{where} construction happens, not its asymptotic order. Let $V$, $C$, and $N$ denote the numbers of variables, constraints, and nonzero coefficients. Standard Pyomo evaluates each rule into an expression tree and allocates one Python object per variable and per constraint---$\Theta(V + C + N)$ interpreted allocations before the model reaches the solver---and the large per-object constant, with its attendant memory traffic, is what makes construction superlinear in practice (Section~\ref{sec:results-timing}). Templatization removes the per-row trees but still allocates the $\Theta(V)$ variable objects. The transpiler allocates none: it emits a fixed number of library calls, independent of instance size, and performs the $\Theta(N)$ assembly of the constraint matrix in compiled array code through pandas and SciPy (\autoref{tab:complexity}). Its cost tracks nonzeros in compiled code rather than components in interpreted code.
+\paragraph{Where the work runs.} The speedup is a matter of \emph{where} construction happens. Let $V$, $C$, and $N$ denote the numbers of variables, constraints, and nonzero coefficients, respectively. Standard Pyomo instantiates the formulation by allocating at least one distinct Python object in memory for every variable, constraint, and expression term. This results in $\Theta(V + C + N)$ interpreted allocations before the model ever reaches the solver. Traversing millions of disjoint Python objects introduces severe cache misses, alongside a large per-object constant and its attendant memory traffic. For large-scale problems, these factors cause construction times to become superlinear in practice (Section~\ref{sec:results-timing}).
+
+Pyomo's templatization feature mitigates some of this by removing per-row expression trees, but it still incurs the $\Theta(V)$ overhead of allocating individual variable objects. The transpiler eliminates this Python-level instantiation entirely. Instead of creating objects per variable or constraint, the generated script issues an $O(1)$ number of vectorized library calls, completely independent of the problem size (\autoref{tab:complexity}). The $\Theta(N)$ work of assembling the constraint matrix is pushed entirely into compiled C-level array operations using pandas and SciPy. By maintaining the data in contiguous memory and passing sparse arrays directly to Gurobi's \texttt{addMVar} API, the computational cost strictly tracks nonzeros in compiled code rather than discrete component objects in interpreted code.
 
 \begin{table}[ht]
 \centering
-\caption{Construction cost for a model with $V$ variables, $C$ constraints, and $N$ nonzero coefficients. The pipelines share the $\Theta(N)$ order but differ in whether that work runs as interpreted object allocation or compiled array code, and in how many size-dependent Python-level operations they issue.}
+\caption{Construction cost for a model with $V$ variables, $C$ constraints, and $N$ nonzero coefficients. The pipelines share the $\Theta(N)$ order, but they differ in whether that work runs as interpreted object allocation or compiled array code, and in how many size-dependent Python-level operations they issue.}
 \label{tab:complexity}
 \small
-\begin{tabular}{@{}p{0.20\textwidth}p{0.18\textwidth}p{0.19\textwidth}p{0.13\textwidth}p{0.11\textwidth}@{}}
+\begin{tabular}{@{} >{\raggedright\arraybackslash}p{0.22\textwidth} 
+                    >{\raggedright\arraybackslash}p{0.22\textwidth} 
+                    >{\raggedright\arraybackslash}p{0.20\textwidth} 
+                    >{\raggedright\arraybackslash}p{0.16\textwidth} 
+                    >{\raggedright\arraybackslash}p{0.12\textwidth} @{}}
 \toprule
 \textbf{Pipeline} & \textbf{Intermediate form} & \textbf{Python object allocations} & \textbf{Where $\Theta(N)$ runs} & \textbf{In-place re-solve} \\
 \midrule
-Pyomo (\texttt{persistent}) & expression tree per constraint & $\Theta(V + C + N)$ & interpreted & yes \\
-Pyomo + templatization & one template per block & $\Theta(V)$ & interpreted & no \\
-Transpiler (COO+MVar) & sparse COO arrays & $O(1)$ in $V, C$ & compiled & yes \\
+Pyomo (\texttt{persistent}) & Expression tree per constraint & $\Theta(V + C + N)$ & Interpreted & Yes \\
+Pyomo + templatization & One template per block & $\Theta(V)$ & Interpreted & No \\
+Transpiler (COO+MVar) & Sparse COO arrays & $O(1)$ & Compiled & Yes \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{From a rule to a matrix.} The assembly is a relational join. Take the supply constraint $\sum_{j \in J} x_{ij} \le s_i$. Number the variables by a bijection $\gamma:(i,j)\mapsto\{0,\dots,|I||J|-1\}$ and the rows by $\rho:i\mapsto\{0,\dots,|I|-1\}$; the block is $A\in\{0,1\}^{|I|\times|I||J|}$ with $A_{\rho(i),\,\gamma(i,j)}=1$. From a table of variable columns $\{(i,j,\gamma(i,j))\}$ and a table of constraint rows $\{(i,\rho(i))\}$, an equi-join on the shared index $i$ yields exactly the nonzero coordinates $(\rho(i),\gamma(i,j))$; these become a sparse matrix passed to Gurobi as \texttt{addMConstr}$(A,\,x,\,{\le},\,s)$. A weighted sum $\sum_j w_{ij}x_{ij}$ simply carries $w_{ij}$ as the join's coefficient column in place of $1$.
+\paragraph{From a rule to a matrix.} The structural assembly relies on treating constraint generation as a relational join. Consider a standard supply constraint, $\sum_{j \in J} x_{ij} \le s_i$. To map this to a sparse matrix, we number the variables using a bijection $\gamma:(i,j)\mapsto\{0,\dots,|I||J|-1\}$ and the constraints using $\rho:i\mapsto\{0,\dots,|I|-1\}$. The corresponding block of the coefficient matrix is $A\in\{0,1\}^{|I|\times|I||J|}$ with nonzeros located at $A_{\rho(i),\,\gamma(i,j)}=1$. 
 
-Each shape the transpiler recognizes is one such recipe (\autoref{tab:patterns}): a join that produces the nonzero coordinates, a coefficient column, and a sparse assembly. The capacity, flow-conservation, and bill-of-materials constraints of Section~\ref{sec:results-problems} are all instances.
+The transpiler generates dataframes representing a table of variable columns $\{(i,j,\gamma(i,j))\}$ and a table of constraint rows $\{(i,\rho(i))\}$. An equi-join on the shared index $i$ yields exactly the nonzero coordinates $(\rho(i),\gamma(i,j))$. These coordinates directly populate a sparse COO array passed to Gurobi using the method \texttt{addMConstr}$(A,\,x,\,{\le},\,s)$. For a weighted sum such as $\sum_j w_{ij}x_{ij}$, the parameter $w_{ij}$ serves as the coefficient column in the join in place of $1$.
+
+Each constraint shape the transpiler recognizes corresponds to one such vectorized recipe (\autoref{tab:patterns}): a sequence of joins that produces the nonzero coordinates, a coefficient column, and a sparse assembly. The capacity, flow-conservation, and bill-of-materials constraints evaluated in Section~\ref{sec:results-problems} are all instances of these patterns.
 
 \begin{table}[ht]
 \centering
@@ -341,30 +297,32 @@ Each shape the transpiler recognizes is one such recipe (\autoref{tab:patterns})
 \toprule
 \textbf{Shape} & \textbf{Algebraic form} & \textbf{Assembly} \\
 \midrule
-Grouped sum & $\sum_{j} w_{ij}\,x_{ij} \le b_i$ & join variable table with row table on the shared index; coefficient $w_{ij}$ (or $1$) \\
-Flow balance & $\sum_{\delta^+(n)} x - \sum_{\delta^-(n)} x = b_n$ & two joins on the out/in arc sets, coefficients $+1/-1$, concatenated \\
-Cross-dimensional & $z_{ct} = \sum_{p\in P(c)} a_{pc}\,y_{pt}$ & join $a$ with $y$ on $p$, then with the row table on $(c,t)$; coefficient $a_{pc}$; the $z$ term contributes $-I$ \\
-Direct bound & $x_i \le b_i$ & one nonzero per row (identity-like) \\
-Linear combination & $\sum_i (\alpha x_i + \beta y_i) \le b$ & one block per variable term, each with its own coefficient \\
+Grouped sum & $\sum_{j} w_{ij}\,x_{ij} \le b_i$ & Join variable table with row table on the shared index; coefficient $w_{ij}$ (or $1$) \\
+Flow balance & $\sum_{\delta^+(n)} x - \sum_{\delta^-(n)} x = b_n$ & Two joins on the out/in arc sets, coefficients $+1/-1$, concatenated \\
+Cross-dimensional & $z_{ct} = \sum_{p\in P(c)} a_{pc}\,y_{pt}$ & Join $a$ with $y$ on $p$, then with the row table on $(c,t)$; coefficient $a_{pc}$; the $z$ term contributes $-I$ \\
+Direct bound & $x_i \le b_i$ & One nonzero per row (identity-like) \\
+Linear combination & $\sum_i (\alpha x_i + \beta y_i) \le b$ & One block per variable term, each with its own coefficient \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{Build and update.} The generated module exposes two functions. \texttt{build\_vectorized\_model} constructs the model; \texttt{update\_vectorized\_model} overwrites the right-hand sides and objective coefficients of an existing model in $\Theta(N)$ without touching its structure, so a model is re-solved under revised data at negligible cost. This is the re-solve loop of \autoref{fig:diagram2}, and the capability templatization forfeits through its incompatibility with the persistent backend.
+\paragraph{Build and update.} The generated module exposes two functions. \texttt{build\_vectorized\_model} constructs the initial model, and \texttt{update\_vectorized\_model} overwrites the right-hand sides and objective coefficients of an existing model in $\Theta(N)$ time without touching its structure. This capability is paramount for workflows such as inference on past data or rapid scenario analysis, where the mathematical architecture is constant but the data parameters rotate frequently. Templatization forfeits this capability through its incompatibility with the persistent backend.
 
-The transpiler is deliberately restricted to linear models whose constraints fall within the catalog and that observe a few authoring conventions---index arithmetic precomputed into sets, no data-dependent branching inside a rule. The restriction is what keeps the pattern match sound and the output checkable; the catalog itself grew example by example, each new shape locked in by a regression (Section~\ref{sec:methods-verify}).
+To guarantee this performance and maintain checkability, the transpiler is deliberately restricted to (mixed-integer) linear models whose constraints map to the known catalog (\autoref{tab:patterns}). Furthermore, we enforce strict authoring conventions: index arithmetic must be precomputed into sets, and data-dependent branching within algebraic rules is prohibited. These constraints ensure that the static pattern-matching remains mathematically sound. The catalog of supported topological shapes was developed iteratively, with each newly generated pattern permanently locked in by the differential regression suite detailed in Section~\ref{sec:methods-verify}. 
+
+This catalog represents the current stable release. The transpiler remains under active development, continuously leveraging the agentic loop to safely synthesize, verify, and integrate new structural architectures as future models require them.
 
 \section{Computational Results}
 \label{sec:results}
 
-We evaluate the transpiler along two independent axes. Section~\ref{sec:results-problems} introduces three benchmark formulations that exercise the range of indexing structures the transpiler must handle. Section~\ref{sec:results-verify} establishes correctness, certifying that each transpiled model is structurally identical to the model Pyomo builds across many reduced instances. Section~\ref{sec:results-timing} quantifies the construction-time advantage of the transpiled workflow over Pyomo's native backends. Finally, Section~\ref{sec:results-epidemic} applies the framework to the large-scale epidemic model that originally motivated it.
+We evaluate the transpiler across two operational domains. Section~\ref{sec:results-benchmarks} assesses the framework against three canonical benchmark formulations, establishing both strict structural equivalence against Pyomo (Section~\ref{sec:results-verify}) and quantifying the resulting construction-time speedups (Section~\ref{sec:results-timing}). Following these controlled experiments, Section~\ref{sec:results-epidemic} applies the agentic transpilation methodology to a large-scale epidemic model—the real-world use case that originally motivated this research.
 
 \subsection{Benchmark Models}
-\label{sec:results-problems}
+\label{sec:results-benchmarks}
 
-We use three parameterized model families. Each is a feasibility formulation---a set of decision variables and constraints without an objective---since our concern is the cost of \emph{constructing} the model rather than solving it. Each family is specified once as a Pyomo model-building function and paired with a data generator that emits instances of arbitrary size from a fixed random seed, so that the same specification produces both the small instances used for verification and the large instances used for timing.
+We use three parameterized model families. Each is structured as a pure feasibility formulation---a set of decision variables and constraints without an objective---since our benchmark focuses on the computational cost of \emph{constructing} the model architecture rather than solving it. Each family is specified once as a Pyomo model-building function and paired with a deterministic data generator. This ensures that the exact same Python specification reliably produces both the truncated instances required for verification and the massive instances required for benchmarking.
 
-\paragraph{Supply--Demand.} Given a set of sources $I$ and destinations $J$, with supply $s_i \ge 0$ available at each source and demand $d_j \ge 0$ required at each destination, the decision variables $x_{ij} \ge 0$ denote the quantity shipped from $i$ to $j$. A feasible shipping plan satisfies
+\paragraph{Supply--Demand.} Given a set of sources $I$ and destinations $J$, with supply $s_i \ge 0$ available at each source and demand $d_j \ge 0$ required at each destination, the decision variables $x_{ij} \ge 0$ denote the quantity shipped from $i$ to $j$. A feasible shipping plan satisfies:
 \[
 \sum_{j \in J} x_{ij} \le s_i \quad \forall i \in I, \qquad
 \sum_{i \in I} x_{ij} \ge d_j \quad \forall j \in J, \qquad
@@ -372,36 +330,91 @@ x_{ij} \ge 0 .
 \]
 An instance has $|I| \times |J|$ variables.
 
-\paragraph{Multi-Commodity Network Flow.} On a directed graph with nodes $N$ and arcs $E \subseteq N \times N$, a set of commodities $K$ must be routed simultaneously. For each node $n$, let $\delta^{+}(n)$ and $\delta^{-}(n)$ denote its outgoing and incoming arcs. Each arc $(i,j)$ has capacity $u_{ij} \ge 0$ shared across commodities, and $b_{nk}$ is the net flow of commodity $k$ required at node $n$. The variables $x_{ijk} \ge 0$ carry commodity $k$ on arc $(i,j)$, and a feasible routing satisfies
+\paragraph{Multi-Commodity Network Flow.} On a directed graph with nodes $N$ and arcs $E \subseteq N \times N$, a set of commodities $K$ must be routed simultaneously. For each node $n$, let $\delta^{+}(n)$ and $\delta^{-}(n)$ denote its outgoing and incoming arcs. Each arc $(i,j)$ has capacity $u_{ij} \ge 0$ shared across commodities, and $b_{nk}$ is the net flow of commodity $k$ required at node $n$. The variables $x_{ijk} \ge 0$ carry commodity $k$ on arc $(i,j)$, and a feasible routing satisfies:
 \[
 \sum_{k \in K} x_{ijk} \le u_{ij} \quad \forall (i,j) \in E, \qquad
 \sum_{j \in \delta^{+}(n)} x_{njk} \;-\; \sum_{i \in \delta^{-}(n)} x_{ink} = b_{nk} \quad \forall n \in N,\, k \in K,
 \]
 with $x_{ijk} \ge 0$. The adjacency sets $\delta^{+}(\cdot)$ and $\delta^{-}(\cdot)$ are precomputed and supplied as indexed sets.
 
-\paragraph{Bill-of-Materials.} A production model links product builds to component purchases across periods. Over products $P$, components $C$, and periods $T$, let $P(c) \subseteq P$ be the products that use component $c$, let $a_{pc} \ge 0$ be the amount of $c$ consumed per unit of $p$, and let $U_{pt} \ge 0$ be the capacity for building $p$ in period $t$. The variables $y_{pt} \ge 0$ and $z_{ct} \ge 0$ denote the amount of product $p$ built and component $c$ bought in period $t$. A feasible plan satisfies
+\paragraph{Bill-of-Materials.} A production model links product builds to component purchases across periods. Over products $P$, components $C$, and periods $T$, let $P(c) \subseteq P$ be the products that use component $c$, let $a_{pc} \ge 0$ be the amount of $c$ consumed per unit of $p$, and let $U_{pt} \ge 0$ be the capacity for building $p$ in period $t$. The variables $y_{pt} \ge 0$ and $z_{ct} \ge 0$ denote the amount of product $p$ built and component $c$ bought in period $t$. A feasible plan satisfies:
 \[
 y_{pt} \le U_{pt} \quad \forall p,\, t, \qquad
 z_{ct} = \sum_{p \in P(c)} a_{pc}\, y_{pt} \quad \forall c \in C,\, t \in T, \qquad
 y_{pt} \ge 0,\; z_{ct} \ge 0 .
 \]
-The coupling parameter $a_{pc}$ is stored over the product--component pairs that actually occur, rather than over the dense grid $P \times C$; as Section~\ref{sec:results-timing} shows, expressing this sparsity in the index structure is decisive for construction speed.
+The coupling parameter $a_{pc}$ is defined exclusively over the product--component pairs that actually occur, rather than over the dense Cartesian grid $P \times C$. Expressing this sparsity in the index structure is decisive for construction speed.
 
-\subsection{Verification of Equivalence}
+\subsubsection{Verification of Equivalence}
 \label{sec:results-verify}
 
-Before comparing construction times, we confirm that the transpiled code and the Pyomo reference build the same model. Using the differential-testing procedure of Section~\ref{sec:methods-verify}, we compare the two solver-level models on many small instances drawn from the same specifications as the benchmarks. Because the data is an explicit argument and the reduced instances retain the indexing structure of the full model, Pyomo instantiation stays inexpensive and equivalence can be checked broadly rather than on a single case. Across $30$ reduced instances of the three benchmark models---each at several sizes and three random seeds---and $21$ additional formulations that isolate individual modeling features, every transpiled model is structurally identical to its Pyomo reference. The same procedure surfaced a genuine defect during development: on a formulation whose variables carried explicit interval bounds, the transpiler had dropped the upper bound, leaving the model dimensions unchanged but enlarging its feasible region. The discrepancy was repaired and retained as a regression test. Having established equivalence, we turn to construction time.
+Before comparing construction times, we must rigorously confirm that the transpiled code and the Pyomo reference build the same model. Using the differential-testing procedure of Section~\ref{sec:methods-verify}, we compare the two solver-level models on many small instances drawn from the same specifications as the benchmarks. Because the data is an explicit argument and the reduced instances retain the indexing structure of the full model, Pyomo instantiation stays inexpensive and equivalence can be checked broadly rather than on a single case. Across $30$ reduced instances of the three benchmark models---each at several sizes and three random seeds---and $21$ additional formulations that isolate individual modeling features, every transpiled model proved structurally identical to its Pyomo reference. 
 
-\subsection{Build-Time Performance}
+% I don't think that this is necessary here. Notably, this strict verification protocol successfully trapped a semantic defect during early development: on a formulation where variables carried explicit interval bounds, the transpiler silently dropped the upper bound. This left the model dimensions unchanged but enlarged its feasible region. The discrepancy was repaired and retained as a regression test. Having established equivalence, we turn to construction time.
+
+\subsubsection{Build-Time Performance}
 \label{sec:results-timing}
 
-Having established equivalence, we measure construction time. We compare four pipelines, all derived from the same Pyomo model-building function: standard Pyomo through \texttt{gurobi\_persistent}; Pyomo with constraint and objective templatization compiled through Gurobi's matrix interface (\texttt{gurobi\_direct}); the transpiler's initial \texttt{gurobipy-pandas} output; and its current output built from sparse coordinate-format matrices via \texttt{addMVar} and \texttt{addMConstr} (COO+MVar). Reported times measure model construction only and exclude the solve. Each build is timed with the cyclic garbage collector disabled and a full collection forced beforehand, so that garbage-collection activity during the construction of the many-object Pyomo models does not distort the measurement. We impose a construction budget of $25$ minutes per instance: once a pipeline exceeds this budget at a given size, larger instances of the same family are not attempted and are reported as timeouts. \autoref{tab:supply-demand}, \autoref{tab:network-flow}, and \autoref{tab:bom} report the results in minutes.
+Having established equivalence, we now evaluate construction time. We compare four pipelines, all derived from the exact same Pyomo model-building function: standard Pyomo through \texttt{gurobi\_persistent}; Pyomo with constraint and objective templatization compiled through Gurobi's matrix interface (\texttt{gurobi\_direct}); the transpiler's initial \texttt{gurobipy-pandas} output; and its current output built from sparse coordinate-format matrices via \texttt{addMVar} and \texttt{addMConstr} (COO+MVar). Reported times measure model construction only and exclude the solve. To prevent Python's automatic memory management from distorting the measurements of the many-object models, each build is timed with the cyclic garbage collector disabled and a full collection forced beforehand. We impose a scaling threshold of 25 minutes. If a pipeline's construction time for a given instance exceeds this threshold, the run completes to establish the performance curve, but all larger instance sizes for that pipeline are skipped and reported as timeouts. \autoref{tab:supply-demand}, \autoref{tab:network-flow}, and \autoref{tab:bom} report the results in minutes.
 
-Standard Pyomo scales superlinearly on every family and exhausts the budget at the largest sizes. On the supply--demand model, construction rises from roughly one minute at $5.3$ million variables to over seventy minutes at $42$ million, and does not complete within the $25$-minute budget at $81$ million; the network-flow model behaves similarly. The cost is dominated by materializing one Python expression object for each variable and constraint, an overhead that persists regardless of the chosen backend.
+\begin{table}[H]
+\centering
+\caption{Build times for the Supply-Demand problem (in minutes).
+\texttt{gurobipy-pandas} denotes Claude Code's initial generated implementation using the \texttt{gurobipy-pandas} library; COO+MVar denotes the current Gurobi-native implementation using sparse COO matrices and \texttt{MVar}.}
+\label{tab:supply-demand}
+\begin{tabular}{lrrrrr}
+\toprule
+Size & Variables & Pyomo & Pyomo+Template & gurobipy-pandas & COO+MVar \\
+\midrule
+\(2300^2\) & 5,290,000  & 0.823 & 0.206 & 0.376 & 0.051 \\
+\(3300^2\) & 10,890,000 & 1.955 & 0.410 & 0.766 & 0.107 \\
+\(4700^2\) & 22,090,000 & 6.328 & 0.900 & 1.605 & 0.227 \\
+\(6500^2\) & 42,250,000 & 70.699 & 2.241 & 3.188 & 0.506 \\
+\(9000^2\) & 81,000,000 & TIMEOUT & 9.285 & 6.758 & 1.221 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-Templatization narrows this gap substantially without closing it. By avoiding the per-constraint expression construction, it brings Pyomo to within a small constant factor of the native pipelines on the supply--demand and network-flow models---roughly four to eight times slower than COO+MVar, rather than orders of magnitude. The residual difference reflects the cost of instantiating one variable object per column before the matrix compiler runs; because this cost is incurred per object, it remains proportional to model size, whereas the matrix pipelines avoid it entirely.
+\begin{table}[H]
+\centering
+\caption{Build times for the Network Flow problem.}
+\label{tab:network-flow}
+\begin{tabular}{lrrrrr}
+\toprule
+Size & Variables & Pyomo & Pyomo+Template & gurobipy-pandas & COO+MVar \\
+\midrule
+\(n=5000,k=175\)  & 5,250,000  & 1.142 & 0.302 & 0.470 & 0.087 \\
+\(n=7500,k=225\)  & 10,125,000 & 2.340 & 0.602 & 0.900 & 0.166 \\
+\(n=11000,k=285\) & 18,810,000 & 8.707 & 1.272 & 1.741 & 0.322 \\
+\(n=16000,k=360\) & 34,560,000 & 105.128 & 2.886 & 3.581 & 0.701 \\
+\(n=22000,k=430\) & 56,760,000 & TIMEOUT & 5.849 & 6.627 & 1.361 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-The bill-of-materials model illustrates a modeling pitfall that dominates all others when present. If the coupling parameter $a_{pc}$ is declared over the dense grid $P \times C$ with a default value of zero, template compilation must resolve that default at every dense coordinate, and construction slows sharply---enough to exceed even standard Pyomo at moderate sizes. Declaring $a_{pc}$ over only the product--component pairs that occur, as in Section~\ref{sec:results-problems}, restores the expected scaling for every pipeline while producing an identical constraint matrix, as the equivalence test confirms. Sparsity, in other words, must be expressed in the index structure of the model rather than left implicit in the values of a densely indexed parameter.
+\begin{table}[H]
+\centering
+\caption{Build times for the Bill-of-Materials problem.}
+\label{tab:bom}
+\begin{tabular}{lrrrrr}
+\toprule
+Size & Variables & Pyomo & Pyomo+Template & gurobipy-pandas & COO+MVar \\
+\midrule
+\(p=10k,c=20k,t=80\)  & 2,400,000  & 0.774 & 0.172 & 0.176 & 0.053 \\
+\(p=15k,c=30k,t=100\) & 4,500,000  & 1.479 & 0.337 & 0.328 & 0.098 \\
+\(p=22k,c=44k,t=120\) & 7,920,000  & 2.948 & 0.635 & 0.594 & 0.177 \\
+\(p=32k,c=64k,t=150\) & 14,400,000 & 15.080 & 2.439 & 1.181 & 0.351 \\
+\(p=45k,c=90k,t=180\) & 24,300,000 & 116.675 & 2.942 & 2.241 & 0.619 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Standard Pyomo scales superlinearly across every model family and reliably exhausts the compute budget at the largest sizes. On the supply--demand model, construction rises from roughly one minute at $5.3$ million variables to over seventy minutes at $42$ million. The network-flow model behaves similarly. The cost is dominated by materializing one Python expression object for each variable and constraint, an overhead that persists regardless of the chosen backend.
+
+Templatization narrows this gap substantially without closing it. By avoiding the per-constraint expression tree construction, it brings Pyomo to within a small constant factor of the native pipelines on the supply--demand and network-flow models---roughly four to eight times slower than COO+MVar, rather than orders of magnitude. The residual difference reflects the cost of instantiating one variable object per column before the matrix compiler runs. Because this $\Theta(V)$ cost is incurred per object, it remains proportional to model size, whereas the matrix pipelines avoid it entirely.
+
+The bill-of-materials model illustrates a modeling pitfall that dominates all others when present. If the coupling parameter $a_{pc}$ is declared over the dense grid $P \times C$ with a default value of zero, template compilation must resolve that default at every dense coordinate, and construction slows sharply---enough to exceed even standard Pyomo at moderate sizes. Declaring $a_{pc}$ over only the product--component pairs that occur, as in Section~\ref{sec:results-benchmarks}, restores the expected scaling for every pipeline while producing an identical constraint matrix, as the equivalence test confirms. Sparsity, in other words, must be expressed in the index structure of the model rather than left implicit in the values of a densely indexed parameter.
+% TODO Rewrite to: Clarify that in our first round of results, we did not control for this error, and in the second round, we did. Those are the results that are displayed in the tables. 
 
 Across all three families, the transpiled matrix pipeline is fastest by a wide margin. COO+MVar constructs every instance in a small fraction of the time required by any Pyomo pipeline---on the order of a second per five million variables---and is the only method to complete the largest instance of each family within the budget. Because it assembles the sparse matrices directly and never creates per-index Python objects, its cost tracks the number of nonzeros rather than the number of modeling components. Together with the equivalence established in Section~\ref{sec:results-verify}, this realizes the workflow of \autoref{fig:diagram2}: a model retains the readability of its Pyomo specification while being constructed at the speed of hand-written Gurobi matrix code, and without the standard trade-off between fast initial construction and fast iterative re-solving.
 
