@@ -19,7 +19,7 @@
 \usepackage{minted}
 \usepackage{hyperref}
 \usepackage{placeins}
-\def\marking{CUI//PROPIN}
+\def\marking{UUR}
 \allowdisplaybreaks
 \setlength{\headheight}{15.2pt}
 \setlength{\headsep}{15pt}
@@ -38,6 +38,10 @@
 \normalsize Michael Khalfin\\
 \today
 \end{center}
+
+\begin{abstract}
+    This paper introduces a novel framework for accelerating mathematical optimization modeling by translating human-readable Pyomo formulations into high-performance, Gurobi-native C-API structures. To overcome the slow construction times of traditional algebraic modeling languages, the authors deploy a large language model within an agentic workflow to generate a deterministic Python transpiler. To guarantee the correctness of each individually translated model, the system employs data-parametric verification, using differential testing on truncated datasets to ensure every transpiled code constructs a solver-level model that is structurally identical to its Pyomo reference. Computational benchmarks across canonical optimization problems demonstrate that this transpilation pipeline reduces model build times by orders of magnitude compared to standard Pyomo workflows. Finally, the framework's real-world efficacy is demonstrated through its successful deployment on a large-scale epidemic model.
+\end{abstract}
 
 \section{Introduction}
 
@@ -68,8 +72,6 @@ def build_pyomo_model(data):
     m.TotalVolume = pyo.Objective(rule=supply_sum, sense=pyo.maximize)
     
     return m
-
-model = build_pyomo_model(data)
 \end{minted}
 
 Following the execution of \texttt{build\_pyomo\_model(data)}, Pyomo constructs a \textit{ConcreteModel}, an in-memory object-oriented representation of the mathematical program. Pyomo sequentially evaluates the provided rules, mapping sets and parameters to decision variables to construct a symbolic algebraic expression tree.
@@ -82,7 +84,7 @@ Thus, the standard workflow involves a tradeoff between modeling convenience and
 
 \begin{figure}[h]
     \centering
-    \resizebox{0.8\textwidth}{!}{%
+    \resizebox{0.7\textwidth}{!}{%
         \input{../diagram1/diagram1}%
     }
     \caption{The workflow that Pyomo assumes by default.}
@@ -91,12 +93,13 @@ Thus, the standard workflow involves a tradeoff between modeling convenience and
 
 This workflow has an additional drawback: the user may only discover infeasibility or unboundedness after the Pyomo model has already been built and translated. If the formulation or data must then be revised, the expensive construction process is repeated.
 
+\clearpage
 A more efficient workflow is shown in \autoref{fig:diagram2}. The Pyomo formulation remains the canonical, readable specification, but it is immediately \textit{transpiled} into Gurobi-native model-building code rather than instantiated first.\footnote{By transpilation, we mean source-to-source translation: converting Pyomo model-building code into Python code that constructs the corresponding Gurobi model directly.
 } This enables faster iteration when the model is infeasible or unbounded. Once feasibility is established, the Pyomo model can be instantiated retroactively to access the benefits of the modeling layer.
 
 \begin{figure}[ht]
     \centering
-    \resizebox{0.75\textwidth}{!}{%
+    \resizebox{0.7\textwidth}{!}{%
         \input{../diagram2/diagram2}%
     }
     \caption{The Pyomo-to-Gurobi workflow developed in this paper, which preserves Pyomo as the canonical specification while enabling direct Gurobi-native model construction. 
@@ -121,13 +124,15 @@ Its outputs are vetted by differential testing. For a given formulation, both th
 
 This approach provides a different trust model from much of the recent literature on LLMs for optimization. Rather than treating the LLM as a black-box optimizer or an oracle for formulation quality, we deploy it to produce an intermediate software artifact whose behavior can be validated and iteratively repaired. Failed tests are returned to the agent, while passing cases are retained as regression tests. Although we focus on Pyomo-to-Gurobi transpilation, the methodology generalizes across the modeling ecosystem: LLM-assisted transpilers can translate between any AMLs, solver APIs, or optimization transformations. More broadly, this pattern of data-parametric validation applies whenever a trusted reference implementation exists and is highly dependent on input data. By validating equivalence on reduced instances, developers can confidently deploy deterministic, agent-generated code at scale.
 
-To demonstrate the efficacy of this approach, we highlight the build-time speedups achieved across three canonical models. As detailed later in Section~\ref{sec:results} \autoref{tab:supply-demand}, \autoref{tab:network-flow}, and \autoref{tab:bom}, the transpiler reduces construction times by orders of magnitude compared to standard Pyomo pipelines. Section~\ref{sec:results} formally benchmarks these canonical problems before presenting an in-depth case study of a large-scale epidemic model—the specific, real-world use case that motivated this framework.
+% To demonstrate the efficacy of this approach, we highlight the build-time speedups achieved across three canonical models. As detailed later in Section~\ref{sec:results} \autoref{tab:supply-demand}, \autoref{tab:network-flow}, and \autoref{tab:bom}, the transpiler reduces construction times by orders of magnitude compared to standard Pyomo pipelines. Section~\ref{sec:results} formally benchmarks these canonical problems before presenting an in-depth case study of a large-scale epidemic model—the specific, real-world use case that motivated this framework.
 
-\paragraph{Contributions} In summary, this paper makes the following contributions:
+\subsection{Contributions} 
+In summary, this paper makes the following contributions:
 \begin{enumerate}
     \item \textbf{Agent-Generated Transpilation}: We demonstrate that an agentic LLM workflow can successfully construct a deterministic Python transpiler. This artifact bridges the abstraction gap, automatically translating human-readable Pyomo models into Gurobi-native C-API structures to achieve massive build-time speedups.
     \item \textbf{Data-Parametric Verification}: We formalize a differential testing suite that leverages reduced datasets to strictly verify the transpiler's output against the original Pyomo model. This data-truncated validation mirrors the rigorous vetting workflows standard in national laboratory and industrial settings, showing algorithmic correctness before scaling to full production instances.
     \item \textbf{The Oracle-Sandbox (OS) Methodology}: We formalize a generalized blueprint for bridging structural software gaps. In this paradigm, a stochastic agent is permitted to freely synthesize and iterate code (the \emph{sandbox}), provided its outputs are strictly bounded by an independent verification mechanism (the \emph{oracle}). The verification mechanism can be data-parametric testing, as used for our transpiler, or formal software provers like Rocq. This framework effectively functions as an operating system for natural-language programming: human intent (English) is ``compiled'' into deterministic software, with the oracle ensuring the correctness of the underlying implementation.
+    
     We establish that this pairing of agent-driven generation with validation is particularly powerful for translation tasks. When a translation is required between any two rigorous representations, an agent can safely attempt to synthesize the missing bridge. We think that this methodology is applicable across a vast array of computational and engineering domains.
 \end{enumerate}
 
@@ -148,12 +153,12 @@ Beyond benchmarks and context, successful agentic generation relies on human-in-
 \section{Methods: Agentic Generation of the Transpiler}
 \label{sec:methods}
 
-Section~\ref{sec:methods-env} describes the agent's environment and context; Section~\ref{sec:methods-decomp}, the decomposition of the task and the prompting strategy. Section~\ref{sec:methods-verify} presents the differential-testing framework that certifies each transpiled model, and Section~\ref{sec:methods-transpiler} describes the transpiler it produced.
+Section~\ref{sec:methods-env} describes the agent's environment and context; Section~\ref{sec:methods-decomp} deep-dives into the OS method and how we applied it to build the transpiler iteratively. Section~\ref{sec:methods-verify} presents the differential-testing framework that certifies each transpiled model, and Section~\ref{sec:methods-transpiler} describes the transpiler it produced.
 
 \subsection{The Agentic Environment and Context}
 \label{sec:methods-env}
 
-The transpiler was engineered within an agentic coding environment primarily driven by Claude Opus~4.8, supplemented by Claude Sonnet~4.6 for targeted refactoring and Claude Fable~5 for code reviews. The agent operates inside the project repository through an autonomous read--edit--run--observe cycle: it reads a file, changes it, executes the result, and inspects the output before the next step. To isolate development during trial-and-error phases, the agent operates within a dedicated Git branch, generating code changes locally and proposing formal software patches only when a stable iteration of the transpiler passes all verification checks. \autoref{tab:agent-env} inventories what the agent could read and do.
+The transpiler was engineered within an agentic coding environment primarily driven by Claude Opus~4.8, supplemented by Claude Sonnet~4.6 for targeted refactoring and Claude Fable~5 for code reviews. The agent operates inside the project repository through an autonomous read--edit--run--observe cycle: it reads a file, changes it, executes the result, and inspects the output before the next step. To isolate development during trial-and-error phases, the agent operates within a dedicated Git branch, generating code changes locally and proposing formal software patches only when a stable iteration of the transpiler passes all verification checks. To manage the extensive repository history, the agent utilized a 1.0-million token context window with automatic context compaction enabled. Furthermore, development cycles were initiated using the environment's ``Plan Mode,'' forcing the agent to explicitly map out its architectural strategy and align with task objectives before generating any code. \autoref{tab:agent-env} inventories what the agent could read and do.
 
 \begin{table}[ht]
 \centering
@@ -162,7 +167,7 @@ The transpiler was engineered within an agentic coding environment primarily dri
 \small
 \begin{tabular}{@{}p{0.23\textwidth}p{0.71\textwidth}@{}}
 \toprule
-\textbf{Reference Libaries} & Pyomo source code files (local environment installation); \texttt{gurobipy-pandas} and \texttt{gurobipy} API documentation (read-only) \\
+\textbf{Reference Libraries} & Pyomo source code files (local environment installation); \texttt{gurobipy-pandas} and \texttt{gurobipy} API documentation (read-only) \\
 \textbf{Repository Artifacts} & Transpiler source code; $21$ canonical Pyomo models serving as the differential and regression testing library (read/write) \\
 \textbf{Testing \& Performance} & Differential testing suite; computational benchmarking scripts (read/write) \\
 \textbf{Actions} & Workspace regex search; read files; edit source; run shell commands and Python scripts (build, solve, test, benchmark); read output and error logs; persistent cross-session state memory \\
@@ -175,9 +180,62 @@ One property of this setup separates it from open-ended code generation: both en
 \subsection{Task Decomposition and Prompting}
 \label{sec:methods-decomp}
 
-% [To be written: decomposition of the translation task into agent-sized
-%  subtasks, the prompting strategy that drove the agentic loop, and the
-%  human-in-the-loop guidance that accompanied it.]
+Every programming paradigm rests on a foundational unit---the function in functional programming, the object in object-oriented programming---from which its idioms and guarantees follow. Programming by natural language rests on \emph{generation}, and generation alone yields software that is fluent but unverified: convenient to produce, yet unsafe to trust at scale. This subsection concerns the discipline that closes that gap---how the agent is prompted, and why an expert programmer's reflexes can work against it.
+
+The natural way to enlist a language model in a programming task is \emph{imperative}: the operator, typically an experienced developer, prescribes the procedure. For example, they may delineate which abstract-syntax-tree nodes to visit, which pattern to match, how to structure the recursion. We found this mode counterproductive, as prescribing the procedure collapses the space of acceptable programs to a single human-conceived trajectory that a stochastic model must then reproduce exactly. A single deviation derails it, and the operator's own algorithmic imagination becomes the ceiling on what can be built. Paradoxically, fluency in software engineering can be a liability in this mode, precisely because it invites such prescription. The Oracle--Sandbox methodology inverts this interface. The operator specifies only \emph{what} a correct output must satisfy---a set of declarative invariants and a mechanical test of membership---and never \emph{how} to achieve it. The agent searches the space of programs, and it is the search, not the operator, that does the work.
+
+\paragraph{Invariants, not procedures.} For the transpiler, the human-supplied specification was a handful of algebraic correspondences---a Pyomo \texttt{Set} maps to a pandas index, a \texttt{Param} to a column, a summation over a set to a grouped relational reduction, a subset restriction to a join---together with the requirement, made precise in Section~\ref{sec:methods-verify}, that the emitted Gurobi model be structurally isomorphic to the one Pyomo builds. The parsing logic was never dictated, and this matters because the parsing logic is where the genuine difficulty lay. 
+
+Two summations that read almost identically in Pyomo compile to entirely different constructions. One aggregates a variable over one of its \emph{own} index dimensions: the total flow on the arcs leaving a node, $\sum_{j} x_{nj}$. The other aggregates a variable against a \emph{separate} mapping between indices: the shift start-times that cover a given hour, $\sum_{t' \in \mathrm{Valid}(t)} x_{t'}$. The only reliable signal separating them is whether the summation's loop index is itself one of the summed variable's indices or an external key that maps into them. Yet, the distinction has no surface syntactic marker. Sparse relations force further subtleties: a constraint may iterate over a three-component tuple $(f,w,s)$ while the decision variable references only $(f,s)$, requiring the generated code to retain the full tuple to enumerate the relation yet project onto a subset to align the join. 
+
+An operator prompting imperatively would have to foresee every such case and encode it by hand. Here no one did. The isomorphism invariant rejected each incorrect guess, and the agent iterated against that signal until the structures matched.
+
+\paragraph{Decomposition into discriminating instances.} This recasts what \emph{decomposition} means. The task was not broken into coding steps but into \emph{discriminating instances}. Each canonical model was chosen to exercise a structural case the transpiler did not yet handle, and its addition to the test suite defined the next target for the loop to reach. Recognizing that an equality whose right-hand side sums a projected tuple constitutes a genuinely new shape is an act of modeling judgment, not software engineering. It is exactly the contribution the domain expert is positioned to make. 
+
+The oracle co-evolved with this catalog. It began as a bare check that the two models had equal variable and constraint counts. As that weak test let defects through, it was progressively strengthened toward the permutation-invariant signature of Section~\ref{sec:methods-verify}. Each strengthening surfacing a class of error the looser test had silently passed, such as a dropped bound or a coefficient attached to the wrong variable.
+
+\paragraph{Synthesis as a sequence of feasibility problems.} Viewed through this lens, the methodology mirrors iterative methods familiar throughout operations research. The oracle defines a feasible region in the space of programs: those whose outputs satisfy every invariant. Against a \emph{fixed} region the inner loop is ordinary feasibility-seeking. For any candidate program, the oracle returns a \emph{localized residual}: the specific invariant that failed. The agent takes a step that reduces this residual, the oracle re-evaluates, and a candidate eventually reaches the feasible region without any single step being prescribed or the operator knowing the path. 
+
+But the region is not fixed; it is refined in both directions. When the oracle admits a defective program, the operator adds a discriminating instance or strengthens the mathematical test. The test is a cut that contracts the region to exclude the newly exposed failure. Conversely, when the oracle rejects a program that is in fact correct, the operator relaxes the test. The equality-orientation and negative-zero normalizations detailed in Section~\ref{sec:methods-verify} are exactly such relaxations, readmitting models that differ from the reference only cosmetically. 
+
+This is \emph{constraint generation} paired with its converse---cuts separated to exclude what should be infeasible, and overly tight constraints dropped to admit what should be feasible---run until the region's boundary coincides with correctness itself. The software specification is not stated in full at the outset and then met. It is \emph{discovered}, one cut at a time, as candidates reveal where the boundary was still misplaced.
+
+\paragraph{Escaping a basin.} A single oracle confines the search to a single basin. Correctness certifies behavior, not efficiency, and no accumulation of correctness-preserving repairs will lift a slow design out of its architecture. Escaping this local optimum demanded a \emph{second} oracle: the benchmark of Section~\ref{sec:results-timing}, which scores speed rather than correctness. Reaching the region this new oracle rewards meant changing the representation wholesale, shifting from building the model as pandas group-by reductions to assembling it as sparse coordinate matrices. 
+
+The repository still holds both transpilers this produced, \texttt{translator-old.py} and \texttt{translator.py}, which are of comparable size (roughly $1{,}900$ and $2{,}300$ lines). The second is not a patch of the first, but an entirely different program, certified by the same correctness oracle yet selected by a different objective. A loop closed on correctness alone would never have found it. That the search can afford such moves at all is a matter of cost. Each evaluation is a differential test on reduced instances completing in milliseconds (Section~\ref{sec:methods-verify}), attempted on an isolated branch and discarded for free when wrong, allowing the loops to run thousands of times.\footnote{We refer here to the marginal financial and temporal cost of trial-and-error from the developer's perspective. While the global computational footprint of frontier LLMs is undeniably massive, the financial cost of a failed generation in a standard flat-rate consumer environment (e.g., Anthropic's subscription model) is effectively zero.} Robustness in a difficult, high-dimensional space is bought not by one well-chosen step, but by many cheap, verified ones.
+
+\paragraph{Where knowledge is created.} It is worth asking where, in this loop, new knowledge actually enters (\autoref{fig:knowledge}). External sources (the Pyomo and Gurobi codebases) supply the definitions of the two endpoints; the operator supplies intent; the agent reads both and emits code; the code, once run, informs the operator. With these nodes alone the loop is \emph{conservative}: information is transported and transformed, but nothing new is manufactured. It is the same closed circulation in which repeated exchanges, however expert the prompting, create nothing that was not already present. 
+
+The generative element is a further node: the \emph{task}, embodied concretely as the oracle together with its growing catalog of verified instances. Unlike the others it is not a conduit but an accumulator. Every pass deposits into it---a new discriminating instance from the operator, a newly certified model from the agent---and both parties consult it on the next pass. Because it grows, the loop is a ratchet rather than a cycle: each turn leaves the shared specification more complete than before. The missing ingredient in an unstructured human--model loop is not a larger model or a cleverer prompt, but a task permitted to become a participant (to change and grow) rather than a fixed backdrop.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  n/.style={draw, rounded corners, align=center, minimum height=8mm, inner sep=2mm, font=\small, fill=black!3},
+  acc/.style={draw, double, double distance=1.2pt, rounded corners, align=center, inner sep=2.6mm, font=\small, fill=black!8},
+  flow/.style={-{Latex[length=2mm]}, gray},
+  dep/.style={-{Latex[length=2.2mm]}, thick}]
+  
+\node[n]   (repo)  at (-4.6, 1.1) {Repositories\\(Pyomo, Gurobi, etc.)};
+\node[n]   (human) at (-4.6,-1.4) {Human\\(intent)};
+\node[n]   (agent) at (-0.6, 2.0) {Agent};
+\node[n]   (code)  at ( 3.4, 1.1) {Code\\(transpiler)};
+\node[acc] (task)  at ( 1.1,-1.6) {\textbf{Task}\\oracle $+$ verified\\instances (grows)};
+
+% conservative circulation (thin, gray)
+\draw[flow] (repo)  -- (agent);
+\draw[flow] (human) -- (agent);
+\draw[flow] (agent) -- (code);
+\draw[flow] (code)  to[bend right=15] (human);
+
+% task as accumulator (thick): deposits in, feedback out
+\draw[dep] (human) -- (task) node[midway, below=2pt, font=\scriptsize] {adds instances};
+\draw[dep] (code)  -- (task) node[midway, right=2pt, font=\scriptsize] {certified models};
+\draw[dep] (task)  -- (agent) node[midway, right=2pt, font=\scriptsize] {residual};
+\end{tikzpicture}
+\caption{Knowledge flow in the loop. Along the thin arrows information is only transported: a conservative circulation in which nothing new is created. New knowledge accumulates only in the \emph{task} (double border): every pass deposits into it, and both parties consult it on the next. Because the task grows, the loop is a ratchet, not a cycle.}
+\label{fig:knowledge}
+\end{figure}
 
 \subsection{Verification by Differential Testing}
 \label{sec:methods-verify}
@@ -213,7 +271,7 @@ Color-refinement histogram, Eq.~\eqref{eq:wl} & Wrong incidence: which variables
 \end{tabular}
 \end{table}
 
-To prevent false negatives, the signature normalizes two common algebraic symmetries. First, an equality row and its negation state (e.g., $a^\top x=b$ versus $-a^\top x=-b$) state the identical constraint. Each equality is therefore encoded as the \emph{unordered} pair of its positive and negative evluations, ensuring that arbitrary negations hash to the same value. Second, floating-point artifacts such as a $-0.0$ right-hand side---which the transpiler's low-level arithmetic can occasionally yield where Pyomo yields $0.0$---are strictly normalized before hashing.
+To prevent false negatives, the signature normalizes two common algebraic symmetries. First, an equality row and its negation (e.g., $a^\top x=b$ versus $-a^\top x=-b$) state the identical constraint. Each equality is therefore encoded as the \emph{unordered} pair of its positive and negative evaluations, ensuring that arbitrary negations hash to the same value. Second, floating-point artifacts such as a $-0.0$ right-hand side---which the transpiler's low-level arithmetic can occasionally yield where Pyomo yields $0.0$---are strictly normalized before hashing.
 
 Because the dataset is explicitly passed to the model function, this verification is executed on \emph{reduced} instances. These instances preserve the exact indexing logic of the full problem but drastically shrink the domain sets, allowing Pyomo to instantiate the reference graph in milliseconds. We test each benchmark model at several sizes and three seeds---thirty instances---together with twenty-one formulations that each isolate one modeling feature. As the transpiler is deterministic, code certified on these instances is exactly the code that runs at full scale.
 
@@ -235,6 +293,8 @@ Alter an objective coefficient & Objective multiset & No \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+The strict verification protocol also proved useful during development. For example, it successfully caught the semantic defect causing the transpiler to silently drop the upper bound in formulations where variables carried explicit interval bounds.\footnote{This left the model dimensions unchanged but enlarged its feasible region.}
 
 \subsection{The Transpiler}
 \label{sec:methods-transpiler}
@@ -267,11 +327,11 @@ Pyomo's templatization feature mitigates some of this by removing per-row expres
 \caption{Construction cost for a model with $V$ variables, $C$ constraints, and $N$ nonzero coefficients. The pipelines share the $\Theta(N)$ order, but they differ in whether that work runs as interpreted object allocation or compiled array code, and in how many size-dependent Python-level operations they issue.}
 \label{tab:complexity}
 \small
-\begin{tabular}{@{} >{\raggedright\arraybackslash}p{0.22\textwidth} 
-                    >{\raggedright\arraybackslash}p{0.22\textwidth} 
-                    >{\raggedright\arraybackslash}p{0.20\textwidth} 
-                    >{\raggedright\arraybackslash}p{0.16\textwidth} 
-                    >{\raggedright\arraybackslash}p{0.12\textwidth} @{}}
+\begin{tabular}{@{} >{\raggedright\arraybackslash}p{0.21\textwidth}
+                    >{\raggedright\arraybackslash}p{0.21\textwidth}
+                    >{\raggedright\arraybackslash}p{0.19\textwidth}
+                    >{\raggedright\arraybackslash}p{0.14\textwidth}
+                    >{\raggedright\arraybackslash}p{0.11\textwidth} @{}}
 \toprule
 \textbf{Pipeline} & \textbf{Intermediate form} & \textbf{Python object allocations} & \textbf{Where $\Theta(N)$ runs} & \textbf{In-place re-solve} \\
 \midrule
@@ -286,7 +346,7 @@ Transpiler (COO+MVar) & Sparse COO arrays & $O(1)$ & Compiled & Yes \\
 
 The transpiler generates dataframes representing a table of variable columns $\{(i,j,\gamma(i,j))\}$ and a table of constraint rows $\{(i,\rho(i))\}$. An equi-join on the shared index $i$ yields exactly the nonzero coordinates $(\rho(i),\gamma(i,j))$. These coordinates directly populate a sparse COO array passed to Gurobi using the method \texttt{addMConstr}$(A,\,x,\,{\le},\,s)$. For a weighted sum such as $\sum_j w_{ij}x_{ij}$, the parameter $w_{ij}$ serves as the coefficient column in the join in place of $1$.
 
-Each constraint shape the transpiler recognizes corresponds to one such vectorized recipe (\autoref{tab:patterns}): a sequence of joins that produces the nonzero coordinates, a coefficient column, and a sparse assembly. The capacity, flow-conservation, and bill-of-materials constraints evaluated in Section~\ref{sec:results-problems} are all instances of these patterns.
+Each constraint shape the transpiler recognizes corresponds to one such vectorized recipe (\autoref{tab:patterns}): a sequence of joins that produces the nonzero coordinates, a coefficient column, and a sparse assembly. The capacity, flow-conservation, and bill-of-materials constraints evaluated in Section~\ref{sec:results-benchmarks} are all instances of these patterns.
 
 \begin{table}[ht]
 \centering
@@ -306,9 +366,11 @@ Linear combination & $\sum_i (\alpha x_i + \beta y_i) \le b$ & One block per var
 \end{tabular}
 \end{table}
 
-\paragraph{Build and update.} The generated module exposes two functions. \texttt{build\_vectorized\_model} constructs the initial model, and \texttt{update\_vectorized\_model} overwrites the right-hand sides and objective coefficients of an existing model in $\Theta(N)$ time without touching its structure. This capability is paramount for workflows such as inference on past data or rapid scenario analysis, where the mathematical architecture is constant but the data parameters rotate frequently. Templatization forfeits this capability through its incompatibility with the persistent backend.
+\paragraph{Build and update.} The transpiler emits its output as Python source text, which a single call to the built-in \texttt{exec} compiles into a live module. Until it is executed the output remains ordinary, human-inspectable source rather than an opaque in-memory object. The module exposes two functions. \texttt{build\_vectorized\_model} constructs the initial model, and \texttt{update\_vectorized\_model} overwrites the right-hand sides and objective coefficients of an existing model in $\Theta(N)$ time without touching its structure. This capability is paramount for workflows such as inference on past data or rapid scenario analysis, where the mathematical architecture is constant but the data parameters rotate frequently. Templatization forfeits this capability through its incompatibility with the persistent backend.
 
-To guarantee this performance and maintain checkability, the transpiler is deliberately restricted to (mixed-integer) linear models whose constraints map to the known catalog (\autoref{tab:patterns}). Furthermore, we enforce strict authoring conventions: index arithmetic must be precomputed into sets, and data-dependent branching within algebraic rules is prohibited. These constraints ensure that the static pattern-matching remains mathematically sound. The catalog of supported topological shapes was developed iteratively, with each newly generated pattern permanently locked in by the differential regression suite detailed in Section~\ref{sec:methods-verify}. 
+To guarantee this performance and maintain checkability, the transpiler is deliberately restricted to (mixed-integer) linear models whose constraints map to the known catalog (\autoref{tab:patterns}). Furthermore, we enforce strict authoring conventions: index arithmetic must be precomputed into sets, and data-dependent branching within algebraic rules is prohibited. These constraints ensure that the static pattern-matching remains mathematically sound. The catalog of supported topological shapes was developed iteratively, with each newly generated pattern permanently locked in by the differential regression suite detailed in Section~\ref{sec:methods-verify}.
+
+Crucially, this restriction bounds what the transpiler \emph{can build}, not what it might silently get wrong. A construct outside the catalog is never mistranslated undetected: it either raises an exception during transpilation, or---if forced into the nearest pattern---produces a model that the differential test rejects as structurally distinct from the Pyomo reference (Section~\ref{sec:methods-verify}). No transpiled model is trusted until it passes that check. Because the readable Pyomo formulation is always retained as the canonical fallback (\autoref{fig:diagram2}), an unsupported shape costs the user a transpilation attempt, never a correctness guarantee---and, in the spirit of Section~\ref{sec:methods-decomp}, it becomes the next discriminating instance for the loop to absorb.
 
 This catalog represents the current stable release. The transpiler remains under active development, continuously leveraging the agentic loop to safely synthesize, verify, and integrate new structural architectures as future models require them.
 
@@ -349,8 +411,6 @@ The coupling parameter $a_{pc}$ is defined exclusively over the product--compone
 \label{sec:results-verify}
 
 Before comparing construction times, we must rigorously confirm that the transpiled code and the Pyomo reference build the same model. Using the differential-testing procedure of Section~\ref{sec:methods-verify}, we compare the two solver-level models on many small instances drawn from the same specifications as the benchmarks. Because the data is an explicit argument and the reduced instances retain the indexing structure of the full model, Pyomo instantiation stays inexpensive and equivalence can be checked broadly rather than on a single case. Across $30$ reduced instances of the three benchmark models---each at several sizes and three random seeds---and $21$ additional formulations that isolate individual modeling features, every transpiled model proved structurally identical to its Pyomo reference. 
-
-% I don't think that this is necessary here. Notably, this strict verification protocol successfully trapped a semantic defect during early development: on a formulation where variables carried explicit interval bounds, the transpiler silently dropped the upper bound. This left the model dimensions unchanged but enlarged its feasible region. The discrepancy was repaired and retained as a regression test. Having established equivalence, we turn to construction time.
 
 \subsubsection{Build-Time Performance}
 \label{sec:results-timing}
@@ -413,8 +473,9 @@ Standard Pyomo scales superlinearly across every model family and reliably exhau
 
 Templatization narrows this gap substantially without closing it. By avoiding the per-constraint expression tree construction, it brings Pyomo to within a small constant factor of the native pipelines on the supply--demand and network-flow models---roughly four to eight times slower than COO+MVar, rather than orders of magnitude. The residual difference reflects the cost of instantiating one variable object per column before the matrix compiler runs. Because this $\Theta(V)$ cost is incurred per object, it remains proportional to model size, whereas the matrix pipelines avoid it entirely.
 
-The bill-of-materials model illustrates a modeling pitfall that dominates all others when present. If the coupling parameter $a_{pc}$ is declared over the dense grid $P \times C$ with a default value of zero, template compilation must resolve that default at every dense coordinate, and construction slows sharply---enough to exceed even standard Pyomo at moderate sizes. Declaring $a_{pc}$ over only the product--component pairs that occur, as in Section~\ref{sec:results-benchmarks}, restores the expected scaling for every pipeline while producing an identical constraint matrix, as the equivalence test confirms. Sparsity, in other words, must be expressed in the index structure of the model rather than left implicit in the values of a densely indexed parameter.
-% TODO Rewrite to: Clarify that in our first round of results, we did not control for this error, and in the second round, we did. Those are the results that are displayed in the tables. 
+The bill-of-materials model illustrates a modeling pitfall severe enough to distort the comparison if left unchecked, and our handling of it is itself methodologically instructive. If the coupling parameter $a_{pc}$ is declared over the dense grid $P \times C$ with a default value of zero, template compilation must resolve that default at every dense coordinate, and construction slows so sharply that templatized Pyomo becomes \emph{slower} than standard Pyomo and fails outright at the larger sizes. Our first round of benchmarks did not control for this and exhibited precisely that pathology. Recognizing it as an artifact of the formulation rather than of any pipeline, we declared $a_{pc}$ over only the product--component pairs that occur---the sparse support described in Section~\ref{sec:results-benchmarks}---which produces an identical constraint matrix, as the equivalence test confirms, while restoring the expected scaling for every pipeline. The second round, controlled in this way, yields the times reported in \autoref{tab:bom}. The lesson generalizes beyond this model: sparsity must be expressed in the index structure of the formulation, not left implicit in the values of a densely indexed parameter.
+
+A natural concern is whether this reliance on sparse index structure merely displaces the cost into a data-preparation step that our timings exclude. It does not. Building the sparse sets---the adjacency lists $\delta^{\pm}(\cdot)$, the occurring product--component pairs $\{(p,c)\}$---is a single linear pass over information the modeler already holds; one cannot state which products consume which components, or which arcs exist, without it. At every benchmark size this preprocessing completed in well under a second, negligible beside even the fastest build. Nor is the discipline peculiar to our method: expressing sparsity in the index structure is precisely the hygiene that Pyomo's own templatization demands---a densely-defaulted parameter degrades it identically---and it is sound practice even for \texttt{gurobi\_direct}. The transpiler inherits this convention rather than imposing it.
 
 Across all three families, the transpiled matrix pipeline is fastest by a wide margin. COO+MVar constructs every instance in a small fraction of the time required by any Pyomo pipeline---on the order of a second per five million variables---and is the only method to complete the largest instance of each family within the budget. Because it assembles the sparse matrices directly and never creates per-index Python objects, its cost tracks the number of nonzeros rather than the number of modeling components. Together with the equivalence established in Section~\ref{sec:results-verify}, this realizes the workflow of \autoref{fig:diagram2}: a model retains the readability of its Pyomo specification while being constructed at the speed of hand-written Gurobi matrix code, and without the standard trade-off between fast initial construction and fast iterative re-solving.
 
