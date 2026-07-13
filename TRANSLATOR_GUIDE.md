@@ -29,7 +29,46 @@ new_data = {**ex1.data, 'Supply': {'Plant_A': 200, 'Plant_B': 300}}
 update_vectorized_model(m, new_data)
 m.reset()
 m.optimize()
+
+# Option D — verify the transpiler is correct for THIS model (differential test)
+from differential_test import verify
+verify(ex1.build_pyomo_model, ex1.data)   # -> [PASS]/[FAIL], returns a bool
 ```
+
+---
+
+## Verifying a model (`differential_test.py`)
+
+Before trusting the transpiled output at scale, confirm it builds the **same
+model** Pyomo does. `verify(build_pyomo_model, data)` builds the Gurobi model
+two ways — once through Pyomo (`gurobi_persistent`, the reference) and once
+through `translate()` — and compares a permutation-invariant structural
+signature of the two solver-level models. It returns `True` iff they are
+identical up to a relabeling of rows and columns, and prints which component
+differs otherwise (shape, coefficients, RHS, bounds, or incidence structure).
+
+```python
+from differential_test import verify
+import examples.example_22_set_packing as ex
+
+verify(ex.build_pyomo_model, ex.data)
+# [PASS] examples.example_22_set_packing: transpiled model matches Pyomo.
+```
+
+Pass a **small** instance: one whose sets are tiny but whose indexing structure
+matches the full problem, so Pyomo instantiates in milliseconds. Because the
+transpiler is deterministic, a model certified on small data is certified for
+the large data it will actually run on.
+
+To run the whole regression suite (three canonical problems across sizes and
+seeds, plus every example in `examples/`):
+
+```bash
+python differential_test.py      # exits non-zero if any instance disagrees
+```
+
+New models that pass should be added to `EXAMPLE_MODULES` in
+`differential_test.py` so they are retained as regression tests.
 
 ---
 

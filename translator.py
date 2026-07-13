@@ -1256,10 +1256,38 @@ class _CodeGen:
             self._emit(f"m._rhs_ord['{ci.pyomo_name}'] = {rhs_s}.index")
 
     # ------------------------------------------------------------------
+    def _flat_var_filtered(self, term: SumTermInfo, vi: VarInfo, suffix: str) -> str:
+        """Expression for ``_flat_{var}`` restricted to the columns whose index
+        lies in the summation's iteration set.
+
+        A scalar sum such as ``sum(u[p,q] for (p,q) in C)`` ranges the variable
+        ``u`` (indexed by ``A``) over a *different* plain set ``C`` that selects a
+        subset of its columns.  When the variable is indexed exactly by the
+        iteration set, no restriction is needed and ``_flat_{var}`` is returned
+        unchanged, preserving prior behavior.
+        """
+        flat = f'_flat_{term.var_name}'
+        iter_set = term.iter_set
+        if vi.index_sets == [iter_set]:
+            return flat                      # summing the whole variable
+        si = self.t.sets.get(iter_set)
+        if si is None or si.is_indexed:
+            return flat                      # indexed relations are handled by P5
+        names = self.r.all_names_for_var(vi)
+        if (si.dimen or 1) != len(names):
+            return flat                      # arity mismatch: leave untouched
+        cols = '[' + ', '.join(f"'{n}'" for n in names) + ']'
+        sel = f'_sel_{suffix}'
+        self._emit(f"{sel} = pd.DataFrame(list(data['{si.data_key}']), columns={cols})")
+        filtered = f'{flat}_{suffix}'
+        self._emit(f"{filtered} = pd.merge({flat}, {sel}, on={cols})")
+        return filtered
+
     def _gen_P2(self, ci: ConstrInfo):
         """Scalar (single-row) constraint — 1×n sparse matrix."""
         term = ci.lhs_terms[0]
-        flat_v  = f'_flat_{term.var_name}'
+        vi      = self.t.vars[term.var_name]
+        flat_v  = self._flat_var_filtered(term, vi, ci.pyomo_name)
         var_obj = f'_var_{term.var_name}'
         idx_v   = f'_idx_{term.var_name}'
         suffix  = ci.pyomo_name
@@ -1432,6 +1460,31 @@ class _CodeGen:
         return lagged_df, full_outer_names, map_outer_names, inner_col_names
 
     # ------------------------------------------------------------------
+    def _flat_var_aligned(self, var_name: str, target_names: list, suffix: str) -> str:
+        """Expression for ``_flat_{var}`` whose index columns are renamed to
+        ``target_names`` position-wise.
+
+        A direct-variable reference is merged on the *constraint's* index names,
+        but ``_flat_{var}`` carries the variable's own registry names.  When the
+        same variable is subscripted under different argument names in different
+        rules (e.g. ``v[p,q]`` in one constraint and ``v[r,w]`` in another), the
+        merge key must be reconciled.  Returns ``_flat_{var}`` unchanged when the
+        names already coincide, preserving prior behavior for every other model.
+        """
+        flat = f'_flat_{var_name}'
+        vi = self.t.vars.get(var_name)
+        if vi is None:
+            return flat
+        canonical = self.r.all_names_for_var(vi)
+        if len(canonical) != len(target_names):
+            return flat
+        rename = {c: t for c, t in zip(canonical, target_names) if c != t}
+        if not rename:
+            return flat
+        aligned = f'{flat}_{suffix}'
+        self._emit(f"{aligned} = {flat}.rename(columns={rename!r})")
+        return aligned
+
     def _gen_P4(self, ci: ConstrInfo):
         """Cross-dimensional merge — COO + addMConstr."""
         if ci.lhs_is_direct_var:
@@ -1509,16 +1562,19 @@ class _CodeGen:
             var_d  = f'_var_{lhs_v}'
             idx_d  = f'_idx_{lhs_v}'
             dc_df  = f'_dc_{suffix}'
-            self._emit(f"{dc_df} = pd.merge({constr_df}, {flat_d}, on={ck})")
+            flat_d_aligned = self._flat_var_aligned(lhs_v, constr_names, suffix)
+            self._emit(f"{dc_df} = pd.merge({constr_df}, {flat_d_aligned}, on={ck})")
             self._emit(
-                f"_A_neg_{suffix} = scipy.sparse.csr_matrix("
-                f"(-np.ones(len({dc_df})), ({dc_df}['_row'].values, {dc_df}['_col'].values)), "
+                f"_A_dir_{suffix} = scipy.sparse.csr_matrix("
+                f"(np.ones(len({dc_df})), ({dc_df}['_row'].values, {dc_df}['_col'].values)), "
                 f"shape=({n_repr}, len({idx_d})))"
             )
+            # Emit as (direct - sum) OP 0, matching Pyomo's canonical orientation
+            # so that constraint sense and coefficient signs coincide exactly.
             op_str = _py_op_str(ci.op)
             self._emit(
                 f"m._mconstr['{ci.pyomo_name}'] = m.addConstr("
-                f"(_A_sum_{suffix} @ {var_obj} + _A_neg_{suffix} @ {var_d}) "
+                f"(_A_dir_{suffix} @ {var_d} - _A_sum_{suffix} @ {var_obj}) "
                 f"{op_str} np.zeros({n_repr}), name='{ci.pyomo_name}')"
             )
         else:
@@ -1567,16 +1623,19 @@ class _CodeGen:
         idx_d  = f'_idx_{lhs_v}'
         ck     = '[' + ', '.join(f"'{k}'" for k in full_outer) + ']'
         dc_df  = f'_dc_{suffix}'
-        self._emit(f"{dc_df} = pd.merge({constr_df}, {flat_d}, on={ck})")
+        flat_d_aligned = self._flat_var_aligned(lhs_v, full_outer, suffix)
+        self._emit(f"{dc_df} = pd.merge({constr_df}, {flat_d_aligned}, on={ck})")
         self._emit(
-            f"_A_neg_{suffix} = scipy.sparse.csr_matrix("
-            f"(-np.ones(len({dc_df})), ({dc_df}['_row'].values, {dc_df}['_col'].values)), "
+            f"_A_dir_{suffix} = scipy.sparse.csr_matrix("
+            f"(np.ones(len({dc_df})), ({dc_df}['_row'].values, {dc_df}['_col'].values)), "
             f"shape=({n_repr}, len({idx_d})))"
         )
+        # Emit as (direct - sum) OP 0, matching Pyomo's canonical orientation
+        # so that constraint sense and coefficient signs coincide exactly.
         op_str = _py_op_str(ci.op)
         self._emit(
             f"m._mconstr['{ci.pyomo_name}'] = m.addConstr("
-            f"(_A_rhs_{suffix} @ {var_obj} + _A_neg_{suffix} @ {var_d}) "
+            f"(_A_dir_{suffix} @ {var_d} - _A_rhs_{suffix} @ {var_obj}) "
             f"{op_str} np.zeros({n_repr}), name='{ci.pyomo_name}')"
         )
 
@@ -1782,7 +1841,8 @@ class _CodeGen:
 
         ck = '[' + ', '.join(f"'{k}'" for k in constr_names) + ']'
         coo = f'_coo_{suffix}'
-        self._emit(f"{coo} = pd.merge({constr_df}, {flat_v}, on={ck})")
+        flat_v_aligned = self._flat_var_aligned(var_name, constr_names, suffix)
+        self._emit(f"{coo} = pd.merge({constr_df}, {flat_v_aligned}, on={ck})")
         self._emit(
             f"_A_{suffix} = scipy.sparse.csr_matrix("
             f"(np.ones(len({coo})), ({coo}['_row'].values, {coo}['_col'].values)), "

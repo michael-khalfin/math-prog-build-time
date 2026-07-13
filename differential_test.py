@@ -264,6 +264,38 @@ def check_instance(model_fn: Callable, data: dict) -> tuple[bool, list[str]]:
     return (not diffs), diffs
 
 
+def verify(model_fn: Callable, data: dict, name: str = None, verbose: bool = True) -> bool:
+    """Verify that ``translate(model_fn)`` builds a Gurobi model structurally
+    identical to the one Pyomo builds, on the given ``data``. Returns ``True``
+    iff identical; prints a readable PASS/FAIL report when ``verbose``.
+
+    This is the single-model entry point for the differential test. Use a small
+    instance whose sets are tiny but whose indexing structure matches the full
+    problem, so Pyomo instantiates in milliseconds.
+
+        >>> from differential_test import verify
+        >>> import examples.example_1_supply as ex1
+        >>> verify(ex1.build_pyomo_model, ex1.data)
+        [PASS] example_1_supply: transpiled model matches Pyomo.
+        True
+    """
+    label = name or getattr(model_fn, "__module__", getattr(model_fn, "__name__", "model"))
+    try:
+        ok, diffs = check_instance(model_fn, data)
+    except Exception as e:
+        if verbose:
+            print(f"[ERROR] {label}: transpilation or build failed: {type(e).__name__}: {e}")
+        return False
+    if verbose:
+        if ok:
+            print(f"[PASS] {label}: transpiled model matches Pyomo.")
+        else:
+            print(f"[FAIL] {label}: models differ in:")
+            for d in diffs:
+                print(f"       - {d}")
+    return ok
+
+
 # ===========================================================================
 # Test family 1 — data-parametric reduced instances of the canonical problems
 # ===========================================================================
@@ -331,6 +363,7 @@ EXAMPLE_MODULES = [
     "example_16_indexed_subset", "example_17_subset_tuple",
     "example_18_lhs_equality", "example_19_jk_secretary",
     "example_20_p3_name_mismatch", "example_21_p4_name_mismatch",
+    "example_22_set_packing",
 ]
 
 
