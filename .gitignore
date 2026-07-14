@@ -9,3 +9,14 @@ visualize_output/
 *.aux
 *.synctex(busy)
 *_minted
+# OS / editor
+.DS_Store
+
+# Run artifacts
+*.log
+benchmark_run.log
+
+# LaTeX build artifacts (PDFs of diagrams/paper stay tracked)
+*.synctex.gz
+*.bbl
+*.blg

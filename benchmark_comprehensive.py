@@ -8,7 +8,7 @@ Expected total wall-clock time: 2 – 3 hours.
   ① Pyomo               — ConcreteModel + rule evaluation + gurobi_persistent
   ② Pyomo+Template      — ConcreteModel + TEMPLATIZE_* + LinearStandardFormCompiler
                           + addMVar/addMConstr  (mirrors gurobi_direct_v2 internals)
-  ③ gurobipy-pandas     — translator-old.translate() → gppd.add_vars / add_constrs
+  ③ gurobipy-pandas     — translator_old.translate() → gppd.add_vars / add_constrs
   ④ COO / MVar          — translator.translate()     → addMVar + addMConstr
 
 All methods are derived from the same Pyomo model-building function.
@@ -62,19 +62,7 @@ from pyomo.core.base import objective as _pyo_obj_mod
 from pyomo.common.timing import report_timing
 
 import translator     as _new_tr   # COO + MVar
-import importlib.util
-
-def _load_old_translator():
-    spec = importlib.util.spec_from_file_location(
-        "translator_old",
-        "/Users/michaelkhalfin/Repositories/math-prog-build-time/translator-old.py",
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["translator_old"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-_old_tr = _load_old_translator()
+import translator_old as _old_tr   # gurobipy-pandas (legacy comparator)
 
 PYOMO_TIMEOUT_MIN    = 25.0   # skip remaining Pyomo sizes once one exceeds this
 TEMPLATE_TIMEOUT_MIN = 10.0   # skip remaining Pyomo+Template sizes once one exceeds this

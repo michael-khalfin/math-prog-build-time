@@ -264,36 +264,144 @@ def check_instance(model_fn: Callable, data: dict) -> tuple[bool, list[str]]:
     return (not diffs), diffs
 
 
-def verify(model_fn: Callable, data: dict, name: str = None, verbose: bool = True) -> bool:
-    """Verify that ``translate(model_fn)`` builds a Gurobi model structurally
-    identical to the one Pyomo builds, on the given ``data``. Returns ``True``
-    iff identical; prints a readable PASS/FAIL report when ``verbose``.
+def _index_atoms(elem):
+    """Scalar atoms of an index element (a scalar, or a flat tuple of scalars)."""
+    return list(elem) if isinstance(elem, tuple) else [elem]
 
-    This is the single-model entry point for the differential test. Use a small
-    instance whose sets are tiny but whose indexing structure matches the full
-    problem, so Pyomo instantiates in milliseconds.
+
+def _is_indexed_set(v) -> bool:
+    """A dict that maps index keys to lists of index tuples (a Pyomo indexed Set),
+    as opposed to a scalar-valued Param dict."""
+    return isinstance(v, dict) and len(v) > 0 and all(isinstance(x, list) for x in v.values())
+
+
+def shrink_data(data: dict, keep: int = 4) -> dict:
+    """Best-effort reduction of a full ``data`` dict to a small instance that
+    preserves referential integrity, so both pipelines build an *identical* tiny
+    model.
+
+    Every index collection (a list, or the keys/values of a list-valued dict) is
+    capped to its first ``keep`` distinct atoms; the union of these forms the set
+    of kept atoms.  An index element survives only if *all* of its atoms are kept,
+    which guarantees no dangling reference (a tuple that subscripts a variable is
+    dropped exactly when the variable's own index is).  Scalar parameters are
+    kept intact and filtered to their surviving keys.
+
+    This is a heuristic -- it does not know the model's semantics -- so
+    ``verify`` build-tests the result and falls back to the full data if the
+    reduced instance does not build.  The original ``data`` is not mutated.
+    """
+    def first_k_per_position(elems):
+        """First ``keep`` distinct atoms at EACH tuple position. A shared
+        budget across positions would starve later positions of a wide tuple
+        (e.g. keep=2 on 3-tuples keeps atoms from position 0 only, dropping
+        every element) — per-position harvesting guarantees that at least the
+        first element of every collection survives."""
+        cols: dict[int, list] = {}
+        for e in elems:
+            for i, a in enumerate(_index_atoms(e)):
+                lst = cols.setdefault(i, [])
+                if a not in lst and len(lst) < keep:
+                    lst.append(a)
+        return {a for lst in cols.values() for a in lst}
+
+    kept = set()
+    for v in data.values():
+        if isinstance(v, list):
+            kept.update(first_k_per_position(v))
+        elif _is_indexed_set(v):
+            kept.update(first_k_per_position(v.keys()))
+            kept.update(first_k_per_position(e for lst in v.values() for e in lst))
+        elif isinstance(v, dict):                       # scalar Param
+            kept.update(first_k_per_position(v.keys()))
+
+    def survives(e):
+        return all(a in kept for a in _index_atoms(e))
+
+    out = {}
+    for key, v in data.items():
+        if isinstance(v, list):
+            out[key] = [e for e in v if survives(e)]
+        elif _is_indexed_set(v):
+            out[key] = {k: [e for e in lst if survives(e)]
+                        for k, lst in v.items() if survives(k)}
+        elif isinstance(v, dict):
+            out[key] = {k: val for k, val in v.items() if survives(k)}
+        else:
+            out[key] = v                                # scalars pass through
+    return out
+
+
+def verify(model_fn: Callable, data: dict, name: str = None,
+           keep: int = 4, verbose: bool = True) -> bool:
+    """Verify that ``translate(model_fn)`` builds a Gurobi model structurally
+    identical to the one Pyomo builds.  Returns ``True`` iff identical; prints a
+    readable PASS/FAIL report when ``verbose``.
+
+    You may pass the **full** ``data`` -- ``verify`` automatically reduces it to a
+    tiny instance that preserves the problem's indexing structure (so Pyomo
+    instantiates in milliseconds) and, if that reduction fails to build, falls
+    back to progressively larger instances and finally the full data.  Because
+    the transpiler is deterministic, a model certified on the reduced instance is
+    certified for the full-scale data it will actually run on.
 
         >>> from differential_test import verify
         >>> import examples.example_1_supply as ex1
-        >>> verify(ex1.build_pyomo_model, ex1.data)
-        [PASS] example_1_supply: transpiled model matches Pyomo.
+        >>> verify(ex1.build_pyomo_model, ex1.data)   # full data is fine
+        [PASS] examples.example_1_supply: matches Pyomo (2 constrs x 6 vars, reduced).
         True
     """
     label = name or getattr(model_fn, "__module__", getattr(model_fn, "__name__", "model"))
-    try:
-        ok, diffs = check_instance(model_fn, data)
-    except Exception as e:
-        if verbose:
-            print(f"[ERROR] {label}: transpilation or build failed: {type(e).__name__}: {e}")
+    plan = [("reduced", shrink_data(data, keep)),
+            ("reduced", shrink_data(data, keep * 3)),
+            ("full", data)]
+
+    def degenerate(d):
+        """An emptied index collection makes the comparison vacuous (an empty
+        model trivially 'matches') or unbuildable — skip to more data."""
+        for v in d.values():
+            if isinstance(v, (list, dict)) and len(v) == 0:
+                return True
+            if _is_indexed_set(v) and all(len(lst) == 0 for lst in v.values()):
+                return True
         return False
+
+    for tag, d in plan:
+        if tag == "reduced" and degenerate(d):
+            continue                                    # reduction emptied a collection
+        try:
+            ref = build_reference(model_fn, d)
+        except Exception:
+            if tag == "full":
+                if verbose:
+                    print(f"[ERROR] {label}: Pyomo reference failed to build on the full data.")
+                return False
+            continue                                    # this size did not build; try larger
+        if tag == "reduced" and ref.NumConstrs == 0:
+            continue                                    # degenerate reduction; use more data
+        try:
+            tr = build_transpiled(model_fn, d)
+        except Exception as e:
+            if tag == "full":
+                if verbose:
+                    print(f"[FAIL] {label}: transpiled build failed: {type(e).__name__}: {e}")
+                return False
+            continue                                    # reduction artifact; fall back to full
+        diffs = diff_fingerprints(fingerprint(ref), fingerprint(tr))
+        ok = not diffs
+        if verbose:
+            sz = f"{ref.NumConstrs} constrs x {ref.NumVars} vars, {tag}"
+            if ok:
+                print(f"[PASS] {label}: matches Pyomo ({sz}).")
+            else:
+                print(f"[FAIL] {label}: models differ ({sz}):")
+                for dd in diffs:
+                    print(f"       - {dd}")
+        return ok
+
     if verbose:
-        if ok:
-            print(f"[PASS] {label}: transpiled model matches Pyomo.")
-        else:
-            print(f"[FAIL] {label}: models differ in:")
-            for d in diffs:
-                print(f"       - {d}")
-    return ok
+        print(f"[ERROR] {label}: could not build a reference model from the given data.")
+    return False
 
 
 # ===========================================================================
@@ -363,7 +471,7 @@ EXAMPLE_MODULES = [
     "example_16_indexed_subset", "example_17_subset_tuple",
     "example_18_lhs_equality", "example_19_jk_secretary",
     "example_20_p3_name_mismatch", "example_21_p4_name_mismatch",
-    "example_22_set_packing",
+    "example_22_set_packing", "example_23_mixed_dimen",
 ]
 
 

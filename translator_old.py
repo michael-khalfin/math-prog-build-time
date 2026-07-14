@@ -1,11 +1,17 @@
 """
-Pyomo → gurobipy-pandas translator.
+Pyomo → gurobipy-pandas transpiler (legacy).
+
+The first transpiler produced by the agentic loop: it emits
+``gppd.add_vars`` / ``gppd.add_constrs`` calls built from pandas group-by
+reductions.  Superseded for performance by translator.py (sparse COO +
+``addMVar``/``addMConstr``) but retained as a benchmark comparator and as
+evidence that the two designs are distinct programs certified by the same
+oracle (see the paper, Methods).  Not maintained beyond what the benchmark
+requires.
 
 Public API:
-    from translator import translate, solve, solution_proxy
+    from translator_old import translate
     code_str = translate(build_pyomo_model)
-    gp_model, values = solve(build_pyomo_model, data)
-    sol = solution_proxy(values)   # sol.x[i, j].value
 """
 from __future__ import annotations
 
@@ -1724,10 +1730,17 @@ def translate(func) -> str:
     Returns:
         A string containing the complete source of build_vectorized_model.
     """
-    raw_src = inspect.getsource(func)
+    if isinstance(func, str):
+        raw_src, fn_name = func, None
+    else:
+        raw_src = getattr(func, '__transpile_source__', None) or inspect.getsource(func)
+        fn_name = func.__name__
     src = textwrap.dedent(raw_src)
     tree = ast.parse(src)
-    func_def = tree.body[0]
+    defs = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+    if not defs:
+        raise ValueError("no function definition found in the provided source")
+    func_def = next((n for n in defs if fn_name and n.name == fn_name), defs[0])
 
     translator = _Translator(func_def)
     translator.parse()

@@ -1,7 +1,4 @@
 import pyomo.environ as pyo
-import gurobipy as gp
-import gurobipy_pandas as gppd
-import pandas as pd
 
 # Small consistent instance. Membership relations that the model relies on:
 #   C, E[d], K   subset of A          (u is indexed by A)

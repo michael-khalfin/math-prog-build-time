@@ -33,6 +33,17 @@ m.optimize()
 # Option D — verify the transpiler is correct for THIS model (differential test)
 from differential_test import verify
 verify(ex1.build_pyomo_model, ex1.data)   # -> [PASS]/[FAIL], returns a bool
+
+# Option E — dynamically created models (exec / generated source)
+from translator import make_model_fn
+src = '''
+import pyomo.environ as pyo
+def build_pyomo_model(data):
+    ...
+'''
+fn = make_model_fn(src)     # exec + tag with __transpile_source__
+code = translate(fn)        # transpilation works despite having no file
+code = translate(src)       # or skip the function object entirely
 ```
 
 ---
@@ -55,10 +66,19 @@ verify(ex.build_pyomo_model, ex.data)
 # [PASS] examples.example_22_set_packing: transpiled model matches Pyomo.
 ```
 
-Pass a **small** instance: one whose sets are tiny but whose indexing structure
-matches the full problem, so Pyomo instantiates in milliseconds. Because the
-transpiler is deterministic, a model certified on small data is certified for
-the large data it will actually run on.
+You may pass the **full** `data`: `verify` automatically reduces it to a tiny
+instance that preserves the indexing structure (`shrink_data`), so Pyomo
+instantiates in milliseconds; if the reduction fails to build or empties an
+index collection, it falls back to progressively larger instances and finally
+the full data. Because the transpiler is deterministic, a model certified on
+the reduced instance is certified for the full-scale data it will actually
+run on.
+
+Note: `translate` needs the function's source. File-backed functions are read
+via `inspect.getsource`; for functions created at runtime (REPL, `exec`,
+generated code), build them with `make_model_fn(src)` — or pass the source
+string straight to `translate` (Option E). `verify` and `solve` accept
+`make_model_fn` functions too.
 
 To run the whole regression suite (three canonical problems across sizes and
 seeds, plus every example in `examples/`):

@@ -1,6 +1,11 @@
 """
-Test that the translator generates correct gurobipy-pandas code for each example.
-Runs alongside run_tests.py (which tests the hand-written vectorized models).
+Transpiler API tests: for every example, checks (1) count-level equivalence of
+the transpiled model, (2) the solve()/populate_pyomo() round-trip, and (3) the
+update_vectorized_model() RHS hot-swap against a fresh Pyomo ground truth.
+
+For rigorous structural equivalence (coefficients, bounds, incidence), run
+differential_test.py — the primary oracle.  run_tests.py covers only the
+hand-written vectorized models in examples/.
 """
 import sys
 import examples.example_1_supply as ex1

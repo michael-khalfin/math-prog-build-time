@@ -1,6 +1,10 @@
 """
-Benchmark: Pyomo (Python-loop build) vs gurobipy-pandas (vectorized build)
+Benchmark (single-model, SUPERSEDED): Pyomo vs gurobipy-pandas build time
 ==========================================================================
+
+Kept for reference.  Use benchmark_comprehensive.py instead: it compares four
+pipelines (Pyomo persistent, Pyomo+templatization, gurobipy-pandas, COO+MVar)
+across three problem families under a GC-controlled measurement protocol.
 
 Model: Capacitated multi-commodity flow (example_3_multiflow pattern)
   - |E| × |K| variables

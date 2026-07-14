@@ -1,11 +1,21 @@
 """
-Pyomo → gurobipy-pandas translator.
+Pyomo → Gurobi (COO/MVar) transpiler.
+
+Reads a restricted ``build_pyomo_model(data)`` function as source text and
+emits the source of an equivalent ``build_vectorized_model(data)`` that
+constructs the same model directly through Gurobi's matrix API (sparse COO
+matrices, ``addMVar`` + ``addMConstr``), plus an ``update_vectorized_model``
+companion for in-place re-solves.  Pipeline: parse (AST) → classify constraint
+shapes → reconcile index names → generate code.  See TRANSLATOR_GUIDE.md for
+usage and authoring conventions; differential_test.py verifies output against
+the Pyomo reference.
 
 Public API:
-    from translator import translate, solve, solution_proxy
-    code_str = translate(build_pyomo_model)
+    from translator import translate, solve, make_model_fn, solution_proxy
+    code_str = translate(build_pyomo_model)     # function, source str, or
+    fn = make_model_fn(src)                     #   exec'd function
     gp_model, values = solve(build_pyomo_model, data)
-    sol = solution_proxy(values)   # sol.x[i, j].value
+    sol = solution_proxy(values)                # sol.x[i, j].value
 """
 from __future__ import annotations
 
@@ -95,10 +105,6 @@ class ObjInfo:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _get_attr(node, attr, default=None):
-    return getattr(node, attr, default)
-
 
 def _node_is_m_attr(node) -> Optional[str]:
     """If node is `m.Something`, return 'Something', else None."""
@@ -820,8 +826,17 @@ class _IndexRegistry:
         For each term, positions in var_subscript_args that are NOT rule args
         are loop vars — they are the canonical dimension names for those positions."""
         # Accumulate: pos_names[var_name][abs_position] = canonical name
+        # Scan the objective's terms too: a variable may appear only there
+        # (its subscript args are all loop vars, since objectives take no
+        # rule arguments beyond the model).
         pos_names: dict[str, dict[int, str]] = {}
-        for ci in self.t.constrs:
+        scan = list(self.t.constrs)
+        if self.t.obj is not None and self.t.obj.lhs_terms:
+            obj_ci = ConstrInfo(pyomo_name='__obj__', index_sets=[],
+                                rule_name='', rule_args=[])
+            obj_ci.lhs_terms = self.t.obj.lhs_terms
+            scan.append(obj_ci)
+        for ci in scan:
             rule_args_set = set(ci.rule_args)
             for term in ci.lhs_terms + ci.rhs_terms:
                 # Register from the main term's subscript args
@@ -879,13 +894,14 @@ class _IndexRegistry:
     def names_for(self, set_name: str) -> list[str]:
         if set_name in self.registry:
             return self.registry[set_name]
-        # Fallback: lowercase set name
+        # Fallback: synthesize names from the lowercase set name. The arity
+        # must match the set's dimen for ANY dimen — pandas rejects a
+        # MultiIndex whose names count differs from its level count.
         si = self.t.sets.get(set_name)
-        if si and si.dimen == 1:
+        dimen = (si.dimen or 1) if si else 1
+        if dimen == 1:
             return [set_name.lower()]
-        if si and si.dimen == 2:
-            return [set_name.lower() + '_0', set_name.lower() + '_1']
-        return [set_name.lower()]
+        return [f'{set_name.lower()}_{k}' for k in range(dimen)]
 
     def all_names_for_var(self, var: VarInfo) -> list[str]:
         names = []
@@ -2240,21 +2256,84 @@ class _CodeGen:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _source_of(func) -> tuple[str, Optional[str]]:
+    """Recover (source, function_name) for translate()'s input.
+
+    Accepts, in order of preference:
+      * a plain string of Python source (the function need not exist yet);
+      * a function carrying ``__transpile_source__`` — set by ``make_model_fn``
+        for dynamically exec'd functions, which have no file for
+        ``inspect.getsource`` to read;
+      * an ordinary file-backed function.
+    """
+    if isinstance(func, str):
+        return func, None
+    src = getattr(func, '__transpile_source__', None)
+    if src is not None:
+        return src, func.__name__
+    return inspect.getsource(func), func.__name__
+
+
+def _find_func_def(tree: ast.Module, name: Optional[str]) -> ast.FunctionDef:
+    """Locate the model-building FunctionDef in a parsed module: the one with
+    the given name if present, else the first FunctionDef (so a source string
+    may carry imports or other statements around the function)."""
+    defs = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+    if not defs:
+        raise ValueError("no function definition found in the provided source")
+    if name:
+        for n in defs:
+            if n.name == name:
+                return n
+    return defs[0]
+
+
+def make_model_fn(source: str, name: str = 'build_pyomo_model'):
+    """Create a model-building function from a source string, ready for both
+    execution and transpilation.
+
+    ``exec``'d functions have no source file, so ``inspect.getsource`` — and
+    therefore ``translate`` — cannot see their code. This helper execs the
+    source and attaches it to the function as ``__transpile_source__``, which
+    ``translate`` (and everything built on it: ``solve``,
+    ``differential_test.verify``) reads in preference to the file system.
+
+        >>> src = '''
+        ... import pyomo.environ as pyo
+        ... def build_pyomo_model(data):
+        ...     m = pyo.ConcreteModel()
+        ...     ...
+        ...     return m
+        ... '''
+        >>> fn = make_model_fn(src)
+        >>> code = translate(fn)          # works despite having no file
+    """
+    ns: dict = {}
+    exec(compile(source, f"<model:{name}>", "exec"), ns)
+    if name not in ns or not callable(ns[name]):
+        raise ValueError(f"source does not define a function named {name!r}")
+    fn = ns[name]
+    fn.__transpile_source__ = source
+    return fn
+
+
 def translate(func) -> str:
     """
     Translate a restricted build_pyomo_model function into the source code
-    of an equivalent build_vectorized_model function using gurobipy-pandas.
+    of an equivalent build_vectorized_model function using Gurobi's matrix API.
 
     Args:
-        func: A Python function following Pyomo AbstractModel templatization rules.
+        func: A Python function following Pyomo AbstractModel templatization
+            rules; or a string containing such a function's source; or a
+            dynamically created function from ``make_model_fn``.
 
     Returns:
         A string containing the complete source of build_vectorized_model.
     """
-    raw_src = inspect.getsource(func)
+    raw_src, fn_name = _source_of(func)
     src = textwrap.dedent(raw_src)
     tree = ast.parse(src)
-    func_def = tree.body[0]
+    func_def = _find_func_def(tree, fn_name)
 
     translator = _Translator(func_def)
     translator.parse()
@@ -2264,7 +2343,7 @@ def translate(func) -> str:
 
 def solve(func, data, silent: bool = True):
     """
-    Translate func, build and optimize the gurobipy-pandas model, and return
+    Translate func, build and optimize the vectorized Gurobi model, and return
     the solved variable values.
 
     Args:
@@ -2278,17 +2357,7 @@ def solve(func, data, silent: bool = True):
             values – dict {var_name: pd.Series(index → float)}
                      Empty dict if the model was infeasible / no solution found.
     """
-    raw_src = inspect.getsource(func)
-    src = textwrap.dedent(raw_src)
-    tree = ast.parse(src)
-    func_def = tree.body[0]
-
-    t = _Translator(func_def)
-    t.parse()
-    t.classify()
-    registry = _IndexRegistry(t)
-    registry.build()
-    code = _CodeGen(t, registry).generate()
+    code = translate(func)   # accepts file-backed, exec'd, or source-string input
 
     ns = {}
     exec(code, ns)

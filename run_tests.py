@@ -1,3 +1,15 @@
+"""Sanity suite for the HAND-WRITTEN vectorized models in examples/.
+
+Compares variable/constraint counts between each example's Pyomo model and its
+hand-written build_vectorized_model (the early, pre-transpiler baselines).
+It does NOT exercise the transpiler.  Test hierarchy:
+
+    differential_test.py  — primary oracle: structural-signature equivalence
+                            of transpiled vs Pyomo models (run this first)
+    test_translator.py    — transpiler API tests: solve(), populate_pyomo(),
+                            update_vectorized_model()
+    run_tests.py          — this file: hand-written example sanity only
+"""
 import examples.example_1_supply as example_1_supply
 import examples.example_2_network as example_2_network
 import examples.example_3_multiflow as example_3_multiflow
