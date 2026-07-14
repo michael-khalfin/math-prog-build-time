@@ -472,6 +472,7 @@ EXAMPLE_MODULES = [
     "example_18_lhs_equality", "example_19_jk_secretary",
     "example_20_p3_name_mismatch", "example_21_p4_name_mismatch",
     "example_22_set_packing", "example_23_mixed_dimen", "example_24_complex",
+    "example_25_set_packing_2",
 ]
 
 

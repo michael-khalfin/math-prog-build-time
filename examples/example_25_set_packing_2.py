@@ -1,3 +1,32 @@
+# Small consistent instance.  Referential-integrity obligations:
+#   D8, D10[g], D14 subsets of D3; D11, D12 subsets of D4
+#   D1 subset of D0 x D3 (objective);  D15[a,b] subset of D5
+#   D13[(a,b) in D12] tuples (p,q,r) with (p,r) in D3
+#   every (a,b,c) in D5: (a,c) in D3, and D16 must key every D5 element,
+#     with values q such that (b,q) in D4
+#   every (a,b,c,q) in D6: (a,b,c) in D5, (a,c) in D3, (b,q) in D4
+data = {
+    "D0": ["e1"],
+    "D1": [("e1", "a1", "b1"), ("e1", "a2", "b1")],
+    "D2": ["x1"],
+    "D3": [("a1", "b1"), ("a1", "b2"), ("a2", "b1")],
+    "D4": [("g1", "q1"), ("g2", "q1")],
+    "D5": [("a1", "g1", "b1"), ("a2", "g2", "b1")],
+    "D6": [("a1", "g1", "b1", "q1")],
+    "D7": [("y1", "y2")],
+    "D8": [("a1", "b1"), ("a2", "b1")],
+    "D9": ["g1"],
+    "D10": {"g1": [("a1", "b1"), ("a1", "b2")]},
+    "D11": [("g1", "q1")],
+    "D12": [("g2", "q1")],
+    "D13": {("g2", "q1"): [("a1", "x", "b1")]},
+    "D14": [("a1", "b2")],
+    "D15": {("a1", "b2"): [("a1", "g1", "b1")]},
+    "D16": {("a1", "g1", "b1"): ["q1"], ("a2", "g2", "b1"): ["q1"]},
+    "N0": 1,
+}
+
+
 def build_model(data):
     import pyomo.environ as pyo
 
@@ -117,3 +146,6 @@ def build_model(data):
     m.o = pyo.Objective(rule=o, sense=pyo.maximize)
 
     return m
+
+# Standard entry-point alias used by the test suites.
+build_pyomo_model = build_model

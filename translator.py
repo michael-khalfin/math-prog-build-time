@@ -1226,6 +1226,26 @@ class _CodeGen:
                 val = str(coeff) if coeff != 1.0 else '1.0'
                 self._emit(f"{c_var} = np.full(len({idx_v}), {val})")
 
+            # Iteration over a separate subset tuple-set (e.g.
+            # sum(z0[e,a,b] for (e,a,b) in m.D1) with D1 a strict subset of
+            # z0's index product): mask the coefficient vector by membership.
+            # Applies only when the loop covers the variable's full arity;
+            # partial loops (nested full products) keep the dense vector.
+            si_it = self.t.sets.get(term.iter_set)
+            loop_flat = (term.loop_var if isinstance(term.loop_var, list)
+                         else [term.loop_var])
+            all_names = self.r.all_names_for_var(vi) if vi else []
+            if (si_it is not None and not si_it.is_indexed
+                    and term.iter_set not in (vi.index_sets if vi else [])
+                    and term.var_subscript_args
+                    and all(a in loop_flat for a in term.var_subscript_args)
+                    and (si_it.dimen or 1) == len(all_names) == len(term.var_subscript_args)):
+                set_expr = self._set_expr(term.iter_set)
+                if new_data:
+                    set_expr = set_expr.replace('data[', f'{d}[')
+                self._emit(f"{c_var} = {c_var} * "
+                           f"{idx_v}.isin(list({set_expr})).astype(float)")
+
             # Fixed literal subscripts (e.g. m.z5["H", c]) select a slice of
             # the variable: mask the coefficient vector by an indicator on the
             # fixed level(s).
@@ -1649,6 +1669,15 @@ class _CodeGen:
             inner_col_names.append(lv)
             if reg != lv:
                 rename_map[reg] = lv
+        # Rule-arg subscript positions must also align by name: in
+        # sum(z1[e, b, q] for q in D16[a, b, c]) the variable's column for
+        # position 1 (canonical name may be a fallback like 'd4_0') must join
+        # against the relation's outer key 'b', not remain unconstrained.
+        for i, arg in enumerate(subscript_args):
+            if (arg in ci.rule_args and i < len(var_index_names)
+                    and var_index_names[i] != arg
+                    and var_index_names[i] not in rename_map):
+                rename_map[var_index_names[i]] = arg
 
         # Build mapping DataFrame
         map_df = f'_map_{suffix}'
