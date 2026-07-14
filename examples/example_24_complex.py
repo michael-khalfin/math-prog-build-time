@@ -1,3 +1,38 @@
+# Small consistent instance.  Referential-integrity obligations:
+#   D5, D7[g], D10, D19[a,t] subsets of D2      (z0's tail index)
+#   D8 subset of D3; D9[a,b] tuples (p,q,r) with (p,r) in D2
+#   D11[a,b], D12, D16[c,a] subsets of D4       (z2's tail index)
+#   D13[a,b,h] subset of D3
+#   every (a,b,h) in D4: (a,h) in D2 (c4) and a in D15 (c7)
+#   every (a,b,h,q) in D14: (a,b,h) in D4, (a,h) in D2, (b,q) in D3
+data = {
+    "D0": ["c1"],
+    "D2": [("a1", "b1"), ("a1", "b2"), ("a2", "b1")],
+    "D3": [("a1", "q1"), ("a2", "q1"), ("b1", "q1")],
+    "D4": [("a1", "b1", "b2"), ("a2", "b1", "b1")],
+    "D5": [("a1", "b1"), ("a2", "b1")],
+    "D6": ["g1"],
+    "D7": {"g1": [("a1", "b1"), ("a1", "b2")]},
+    "D8": [("a1", "q1")],
+    "D9": {("a1", "q1"): [("a1", "x", "b1"), ("a2", "x", "b1")]},
+    "D10": [("a1", "b1")],
+    "D11": {("a1", "b1"): [("a1", "b1", "b2"), ("a2", "b1", "b1")]},
+    "D12": [("a1", "b1", "b2")],
+    "D13": {("a1", "b1", "b2"): [("a1", "q1")]},
+    "D14": [("a1", "b1", "b2", "q1")],
+    "D15": ["a1", "a2"],
+    "D16": {("c1", "a1"): [("a1", "b1", "b2")],
+            ("c1", "a2"): [("a2", "b1", "b1")]},
+    "D17": ["t1"],
+    "D19": {("a1", "t1"): [("a1", "b1")],
+            ("a2", "t1"): [("a2", "b1")]},
+    "N0": 1,
+    "N1": 2,
+    "N2": 10,
+    "N3": 1,
+}
+
+
 def build_pyomo_model_generic_full(data):
     import pyomo.environ as pyo
 
@@ -160,3 +195,6 @@ def build_pyomo_model_generic_full(data):
     m.o = pyo.Objective(rule=o, sense=pyo.maximize)
 
     return m
+
+# Standard entry-point aliases used by the test suites.
+build_pyomo_model = build_pyomo_model_generic_full

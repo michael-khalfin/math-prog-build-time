@@ -37,8 +37,13 @@ class SetInfo:
     dimen: int = 1
     is_indexed: bool = False       # pyo.Set(m.X, initialize=...)
     index_set: Optional[str] = None
+    parent_sets: list = field(default_factory=list)  # ALL positional parents, e.g. Set(m.D0, m.D15, ...)
     is_subset: bool = False        # declared with within=
     within_set: Optional[str] = None
+    # When initialize= is a literal/comprehension rather than data['key'],
+    # the unparsed expression; it is emitted verbatim in the generated code
+    # (which has `data` in scope), e.g. "[(e, c) for e in ['H','L'] for c in data['D0']]".
+    init_repr: Optional[str] = None
 
 
 @dataclass
@@ -67,6 +72,7 @@ class SumTermInfo:
     iter_index_arg: Optional[str]  # subscript arg when indexed
     var_subscript_args: list = field(default_factory=list)  # args in m.var[a, b, c]
     param_subscript_args: list = field(default_factory=list)  # args in m.Param[a, b]
+    fixed_subscripts: list = field(default_factory=list)   # [(pos, literal)] e.g. m.z5['H', c]
     scalar_coeff: float = 1.0   # constant multiplier e.g. 0.1 * var
     # Intra-sum linear combination: all (var_name, param_name, subscript_args, sign) terms
     # sign is +1 or -1; populated when elt is any linear combination of vars
@@ -92,6 +98,11 @@ class ConstrInfo:
     rhs_terms: list = field(default_factory=list)  # RHS sum terms when swapped
     # For pyo.Constraint(expr=...) — direct expression, no rule function
     inline_expr: object = None
+    # P_affine: general affine row.  Each term is ('var', sign, coeff_expr,
+    # var_name, subscript_args) or ('sum', sign, SumTermInfo); affine_rhs is a
+    # model-free scalar expression string (may reference `data`).
+    affine_terms: list = field(default_factory=list)
+    affine_rhs: str = '0'
 
 
 @dataclass
@@ -156,14 +167,24 @@ def _extract_keyword(call_node, kw_name):
 
 def _extract_subscript_args(subscript_node: ast.Subscript) -> list:
     """Return identifier names from m.var[a, b, c] — used to map loop vars to index positions."""
+    return _extract_subscript_parts(subscript_node)[0]
+
+
+def _extract_subscript_parts(subscript_node: ast.Subscript) -> tuple:
+    """Split m.var[a, "H", c] into (names, fixed): the identifier names in
+    order, and [(position, literal_value)] for constant subscripts (a fixed
+    slice of the variable, e.g. m.z5["H", c])."""
     sl = subscript_node.slice
     if isinstance(sl, ast.Index):   # Python < 3.9 wraps in ast.Index
         sl = sl.value
-    if isinstance(sl, ast.Tuple):
-        return [e.id for e in sl.elts if isinstance(e, ast.Name)]
-    if isinstance(sl, ast.Name):
-        return [sl.id]
-    return []
+    elts = sl.elts if isinstance(sl, ast.Tuple) else [sl]
+    names, fixed = [], []
+    for pos, e in enumerate(elts):
+        if isinstance(e, ast.Name):
+            names.append(e.id)
+        elif isinstance(e, ast.Constant):
+            fixed.append((pos, e.value))
+    return names, fixed
 
 
 def _op_str(op_node) -> str:
@@ -263,26 +284,27 @@ class _Translator:
 
     def _parse_set(self, name: str, call: ast.Call):
         data_key = None
+        init_repr = None
         init_kw = _extract_keyword(call, 'initialize')
         if init_kw is not None:
             data_key = (_node_is_data_subscript(init_kw)
-                        or _node_is_data_method_call(init_kw)
-                        or name)
+                        or _node_is_data_method_call(init_kw))
+            if data_key is None:
+                # Literal / comprehension initializer: carry the expression
+                # itself into the generated code (it may reference `data`).
+                init_repr = ast.unparse(init_kw)
+                data_key = name
 
         dimen = 1
         dimen_kw = _extract_keyword(call, 'dimen')
         if dimen_kw is not None and isinstance(dimen_kw, ast.Constant):
             dimen = dimen_kw.value
 
-        is_indexed = False
-        index_set = None
-        # Positional args: first arg being m.X means indexed set
-        if call.args:
-            first_arg = call.args[0]
-            m_attr = _node_is_m_attr(first_arg)
-            if m_attr:
-                is_indexed = True
-                index_set = m_attr
+        # Positional args that are m.X: parent set(s) of an indexed set
+        # (pyo.Set(m.D0, m.D15, ...) is indexed by the product D0 x D15).
+        parent_sets = [a for a in (_node_is_m_attr(arg) for arg in call.args) if a]
+        is_indexed = bool(parent_sets)
+        index_set = parent_sets[0] if parent_sets else None
 
         is_subset = False
         within_set = None
@@ -299,8 +321,10 @@ class _Translator:
             dimen=dimen,
             is_indexed=is_indexed,
             index_set=index_set,
+            parent_sets=parent_sets,
             is_subset=is_subset,
             within_set=within_set,
+            init_repr=init_repr,
         )
 
     def _parse_param(self, name: str, call: ast.Call):
@@ -513,6 +537,10 @@ class _RuleClassifier:
                 ci.lhs_direct_var = lhs_m_var
                 ci.rhs_terms = [rhs_sum]
                 return
+            # RHS contains variables (big-M rows, indicator linearizations,
+            # var-vs-var bounds): general affine row.
+            if self._node_has_var(rhs_node) and self._try_affine(ci, lhs_node, rhs_node, assigns):
+                return
             # Otherwise P6 direct var
             ci.pattern = 'P6'
             ci.lhs_direct_var = lhs_m_var
@@ -536,8 +564,85 @@ class _RuleClassifier:
                 ci.pattern = 'P1'
             return
 
-        # Fallback: treat as P6
+        # Fallback: general affine row, then P6
+        if self._try_affine(ci, lhs_node, rhs_node, assigns):
+            return
         ci.pattern = 'P6'
+
+    def _node_has_var(self, node) -> bool:
+        """True if the subtree references any m.<decision variable>."""
+        for n in ast.walk(node):
+            attr = _node_is_m_attr(n)
+            if attr and attr in self.t.vars:
+                return True
+        return False
+
+    def _node_model_free(self, node) -> bool:
+        """True if the subtree references no model component at all (only
+        literals and `data`), so it can be emitted verbatim as a scalar."""
+        return not any(_node_is_m_attr(n) for n in ast.walk(node))
+
+    def _try_affine(self, ci: ConstrInfo, lhs_node, rhs_node, assigns) -> bool:
+        """General affine row:  a ± combination of direct variables, var-only
+        sums, and model-free scalars on either side of the relation.  All
+        variable terms are collected on the LHS with signs (preserving the
+        written orientation, as Pyomo does); model-free leaves fold into a
+        scalar RHS expression.  Populates ci and returns True only if every
+        leaf is recognized."""
+        # Pyomo normalizes `a >= b` by swapping into `b <= a`, so its reference
+        # rows carry the swapped orientation; reproduce that here (committed to
+        # ci.op only on success).
+        swapped = ci.op == 'GEQ'
+        if swapped:
+            lhs_node, rhs_node = rhs_node, lhs_node
+        leaves = (_collect_signed_terms(lhs_node, 1)
+                  + _collect_signed_terms(rhs_node, -1))
+        terms, const_parts = [], []
+        for node, sign in leaves:
+            if isinstance(node, ast.Name) and node.id in assigns:
+                node = assigns[node.id]
+            # var-only sum
+            st = self._parse_sum_call(node)
+            if st is not None:
+                if st.param_name or st.intra_terms or st.scalar_coeff != 1.0:
+                    return False
+                terms.append(('sum', sign, st))
+                continue
+            # direct var, optionally scaled by a model-free coefficient
+            coeff_expr, var_node = '1', None
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+                for side, other in ((node.left, node.right), (node.right, node.left)):
+                    if (isinstance(side, ast.Subscript)
+                            and (_node_is_m_attr(side.value) or '') in self.t.vars
+                            and self._node_model_free(other)):
+                        var_node, coeff_expr = side, ast.unparse(other)
+                        break
+            elif (isinstance(node, ast.Subscript)
+                    and (_node_is_m_attr(node.value) or '') in self.t.vars):
+                var_node = node
+            if var_node is not None:
+                vname = _node_is_m_attr(var_node.value)
+                args, fixed = _extract_subscript_parts(var_node)
+                if fixed or not set(args) <= set(ci.rule_args):
+                    return False
+                terms.append(('var', sign, coeff_expr, vname, args))
+                continue
+            # model-free scalar
+            if self._node_model_free(node):
+                const_parts.append((ast.unparse(node), sign))
+                continue
+            return False
+        if not terms:
+            return False
+        if swapped:
+            ci.op = 'LEQ'
+        ci.pattern = 'P_affine'
+        ci.affine_terms = terms
+        # Leaves were moved to the LHS; constants go to the RHS with flipped sign.
+        ci.affine_rhs = (' '.join(
+            f"{'+' if -sign > 0 else '-'} ({expr})" for expr, sign in const_parts
+        ) or '0')
+        return True
 
     def classify_inline(self, ci: ConstrInfo):
         """Handle pyo.Constraint(expr=...) — a direct Compare expression."""
@@ -585,6 +690,8 @@ class _RuleClassifier:
                 ci.pattern = 'P2'
             else:
                 ci.pattern = 'P1'
+            return
+        if self._try_affine(ci, lhs_node, ci.rhs_node, {}):
             return
         ci.pattern = 'P6'
 
@@ -685,12 +792,13 @@ class _RuleClassifier:
         scalar_coeff_val = 1.0   # overridden in the Mult branch when a literal is present
 
         param_subscript_args: list = []
+        fixed_subscripts: list = []
 
         if isinstance(elt, ast.Subscript):
             vn = _node_is_m_attr(elt.value)
             if vn and vn in self.t.vars:
                 var_name = vn
-                var_subscript_args = _extract_subscript_args(elt)
+                var_subscript_args, fixed_subscripts = _extract_subscript_parts(elt)
             elif vn and vn in self.t.params:
                 param_name = vn
                 param_subscript_args = _extract_subscript_args(elt)
@@ -730,6 +838,7 @@ class _RuleClassifier:
             iter_index_arg=iter_index_arg,
             var_subscript_args=var_subscript_args,
             param_subscript_args=param_subscript_args,
+            fixed_subscripts=fixed_subscripts,
             scalar_coeff=coeff,
             intra_terms=intra_terms,
         )
@@ -967,6 +1076,17 @@ class _CodeGen:
             self._emit_var(vi)
             self._emit()
 
+    def _set_expr(self, set_name: str) -> str:
+        """Expression for a plain set's elements in the generated code:
+        data['key'] normally, or the verbatim initializer for sets declared
+        with a literal/comprehension initialize= (which may reference data)."""
+        si = self.t.sets.get(set_name)
+        if si is None:
+            return f"data[{set_name!r}]"
+        if si.init_repr:
+            return si.init_repr
+        return f"data[{si.data_key!r}]"
+
     def _emit_var(self, vi: VarInfo):
         all_names = self.r.all_names_for_var(vi)
 
@@ -987,23 +1107,19 @@ class _CodeGen:
                 dimen = si.dimen if si else 1
                 if dimen > 1:
                     ns = self.r.names_for(s)
-                    loop_parts.append(f"({', '.join(ns)}) in data['{si.data_key}']")
+                    loop_parts.append(f"({', '.join(ns)}) in {self._set_expr(s)}")
                     parts.extend(ns)
                 else:
                     n = self.r.names_for(s)[0]
-                    loop_parts.append(f"{n} in data['{(si.data_key if si else s)}']")
+                    loop_parts.append(f"{n} in {self._set_expr(s)}")
                     parts.append(n)
             self._emit(f"{idx_var}_tuples = [({', '.join(parts)}) for {' for '.join(loop_parts)}]")
             self._emit(f"{idx_var} = pd.MultiIndex.from_tuples({idx_var}_tuples, names=[{names_repr}])")
         else:
             if len(vi.index_sets) == 1:
-                key = self.t.sets[vi.index_sets[0]].data_key
-                self._emit(f"{idx_var} = pd.Index(data['{key}'], name='{all_names[0]}')")
+                self._emit(f"{idx_var} = pd.Index({self._set_expr(vi.index_sets[0])}, name='{all_names[0]}')")
             else:
-                sets_repr = ', '.join(
-                    f"data['{(self.t.sets.get(s) or SetInfo('', s)).data_key}']"
-                    for s in vi.index_sets
-                )
+                sets_repr = ', '.join(self._set_expr(s) for s in vi.index_sets)
                 self._emit(f"{idx_var} = pd.MultiIndex.from_product([{sets_repr}], names=[{names_repr}])")
 
         # Lower/upper bounds: an explicit bounds=(lb, ub) overrides the domain
@@ -1110,6 +1226,16 @@ class _CodeGen:
                 val = str(coeff) if coeff != 1.0 else '1.0'
                 self._emit(f"{c_var} = np.full(len({idx_v}), {val})")
 
+            # Fixed literal subscripts (e.g. m.z5["H", c]) select a slice of
+            # the variable: mask the coefficient vector by an indicator on the
+            # fixed level(s).
+            for pos, lit in term.fixed_subscripts:
+                all_names = self.r.all_names_for_var(vi) if vi else []
+                if pos < len(all_names):
+                    col = all_names[pos]
+                    self._emit(f"{c_var} = {c_var} * "
+                               f"({idx_v}.get_level_values('{col}') == {lit!r}).astype(float)")
+
             term_expr = f'{c_var} @ {var_v}'
             if not obj_parts:
                 obj_parts.append(f'-{c_var} @ {var_v}' if sign < 0 else term_expr)
@@ -1140,9 +1266,73 @@ class _CodeGen:
             self._gen_P_inter_add(ci)
         elif ci.pattern == 'P_intra_add':
             self._gen_P_intra_add(ci)
+        elif ci.pattern == 'P_affine':
+            self._gen_P_affine(ci)
         else:
             self._emit(f"# WARNING: unknown pattern for {ci.pyomo_name}")
         self._emit()
+
+    # ------------------------------------------------------------------
+    def _gen_P_affine(self, ci: ConstrInfo):
+        """General affine row: one coefficient block per term (direct vars and
+        var-only sums, signs and model-free coefficients baked into the block
+        values), model-free scalar RHS.  Assembled with addConstr, preserving
+        the written orientation so signs match the Pyomo reference exactly."""
+        suffix = ci.pyomo_name
+        idx_c = f'_idx_{suffix}'
+        self._emit_constr_index(ci, idx_c)
+        constr_df = f'_constr_{suffix}'
+        self._emit(f"{constr_df} = pd.DataFrame({{'_row': np.arange(len({idx_c}))}}, "
+                   f"index={idx_c}).reset_index()")
+        n_repr = f'len({idx_c})'
+        self._emit_constr_idx_store(ci, suffix, None)
+
+        block_exprs = []
+        for i, t in enumerate(ci.affine_terms):
+            tsfx = f'{suffix}_t{i}'
+            if t[0] == 'var':
+                _, sign, coeff_expr, vname, args = t
+                aligned = self._flat_var_aligned(vname, args, tsfx)
+                dc = f'_dc_{tsfx}'
+                on = '[' + ', '.join(f"'{a}'" for a in args) + ']'
+                self._emit(f"{dc} = pd.merge({constr_df}, {aligned}, on={on})")
+                vals = (f"np.full(len({dc}), {float(sign)})" if coeff_expr == '1'
+                        else f"np.full(len({dc}), {float(sign)} * ({coeff_expr}))")
+                self._emit(
+                    f"_A_{tsfx} = scipy.sparse.csr_matrix("
+                    f"({vals}, ({dc}['_row'].values, {dc}['_col'].values)), "
+                    f"shape=({n_repr}, len(_idx_{vname})))"
+                )
+                block_exprs.append(f"_A_{tsfx} @ _var_{vname}")
+            else:  # 'sum'
+                _, sign, term = t
+                if term.iter_is_indexed:
+                    lagged, full_outer, _, _ = self._emit_indexed_relation_mapping(term, ci, tsfx)
+                    ok = '[' + ', '.join(f"'{k}'" for k in full_outer) + ']'
+                    coo = f'_coo_{tsfx}'
+                    self._emit(f"{coo} = pd.merge({lagged}, {constr_df}, on={ok})[['_col', '_row']]")
+                else:
+                    filtered = self._flat_var_filtered(
+                        term, self.t.vars[term.var_name], tsfx)
+                    on_cols = [a for a in term.var_subscript_args if a in ci.rule_args]
+                    ok = '[' + ', '.join(f"'{k}'" for k in on_cols) + ']'
+                    coo = f'_coo_{tsfx}'
+                    self._emit(f"{coo} = pd.merge({filtered}, {constr_df}, on={ok})")
+                self._emit(
+                    f"_A_{tsfx} = scipy.sparse.csr_matrix("
+                    f"(np.full(len({coo}), {float(sign)}), "
+                    f"({coo}['_row'].values, {coo}['_col'].values)), "
+                    f"shape=({n_repr}, len(_idx_{term.var_name})))"
+                )
+                block_exprs.append(f"_A_{tsfx} @ _var_{term.var_name}")
+
+        lhs_expr = ' + '.join(block_exprs)
+        op_str = _py_op_str(ci.op)
+        self._emit(
+            f"m._mconstr['{ci.pyomo_name}'] = m.addConstr("
+            f"({lhs_expr}) {op_str} np.full({n_repr}, {ci.affine_rhs}), "
+            f"name='{ci.pyomo_name}')"
+        )
 
     # ------------------------------------------------------------------
     def _emit_constr_rows_df(self, ci: ConstrInfo, suffix: str):
@@ -1235,7 +1425,7 @@ class _CodeGen:
     # ------------------------------------------------------------------
     def _gen_P1(self, ci: ConstrInfo):
         term = ci.lhs_terms[0]
-        flat_v   = f'_flat_{term.var_name}'
+        flat_v   = self._flat_var_filtered(term, self.t.vars[term.var_name], ci.pyomo_name)
         var_obj  = f'_var_{term.var_name}'
         idx_v    = f'_idx_{term.var_name}'
         suffix   = ci.pyomo_name
@@ -1284,17 +1474,24 @@ class _CodeGen:
         """
         flat = f'_flat_{term.var_name}'
         iter_set = term.iter_set
-        if vi.index_sets == [iter_set]:
-            return flat                      # summing the whole variable
+        if iter_set in vi.index_sets:
+            return flat                      # iteration covers a whole index block
         si = self.t.sets.get(iter_set)
         if si is None or si.is_indexed:
-            return flat                      # indexed relations are handled by P5
-        names = self.r.all_names_for_var(vi)
-        if (si.dimen or 1) != len(names):
+            return flat                      # indexed relations are handled elsewhere
+        # Filter on the loop-var columns only: for sum(z0[e,c,a,b] for (a,b) in D5)
+        # inside a constraint over (e,c), the subset D5 restricts columns (a, b).
+        # Use the CANONICAL column names of the flat frame at those positions
+        # (the rule's local loop names may differ from the registry names).
+        loop = term.loop_var if isinstance(term.loop_var, list) else [term.loop_var]
+        all_names = self.r.all_names_for_var(vi)
+        cols_list = [all_names[i] for i, a in enumerate(term.var_subscript_args)
+                     if a in loop and i < len(all_names)] or all_names
+        if (si.dimen or 1) != len(cols_list):
             return flat                      # arity mismatch: leave untouched
-        cols = '[' + ', '.join(f"'{n}'" for n in names) + ']'
+        cols = '[' + ', '.join(f"'{n}'" for n in cols_list) + ']'
         sel = f'_sel_{suffix}'
-        self._emit(f"{sel} = pd.DataFrame(list(data['{si.data_key}']), columns={cols})")
+        self._emit(f"{sel} = pd.DataFrame(list({self._set_expr(iter_set)}), columns={cols})")
         filtered = f'{flat}_{suffix}'
         self._emit(f"{filtered} = pd.merge({flat}, {sel}, on={cols})")
         return filtered
@@ -1422,8 +1619,19 @@ class _CodeGen:
         for s in ci.index_sets:
             full_outer_names.extend(self.r.names_for(s))
 
-        parent_set_name = si.index_set if si else None
-        map_outer_names = self.r.names_for(parent_set_name) if parent_set_name else full_outer_names
+        # Outer key columns of the relation dict.  Prefer the subscript names
+        # actually used in the rule (m.D16[c, a] → ['c', 'a'], matching the
+        # constraint columns by construction); fall back to the registry names
+        # of ALL parent sets (a multi-set indexed Set has a tuple key).
+        if term.iter_index_arg:
+            ia = term.iter_index_arg
+            map_outer_names = list(ia) if isinstance(ia, tuple) else [ia]
+        elif si and si.parent_sets:
+            map_outer_names = []
+            for ps in si.parent_sets:
+                map_outer_names.extend(self.r.names_for(ps))
+        else:
+            map_outer_names = full_outer_names
 
         var_index_names  = self.r.all_names_for_var(vi)
         subscript_args   = term.var_subscript_args
@@ -1686,23 +1894,37 @@ class _CodeGen:
         if len(ci.index_sets) == 1:
             s = ci.index_sets[0]
             si = self.t.sets.get(s)
-            key = si.data_key if si else s
             names = self.r.names_for(s)
             if len(names) == 1:
-                self._emit(f"{idx_var} = pd.Index(data['{key}'], name='{names[0]}')")
+                self._emit(f"{idx_var} = pd.Index({self._set_expr(s)}, name='{names[0]}')")
             else:
                 names_repr = str(names)
-                self._emit(f"{idx_var} = pd.MultiIndex.from_tuples(data['{key}'], names={names_repr})")
+                self._emit(f"{idx_var} = pd.MultiIndex.from_tuples({self._set_expr(s)}, names={names_repr})")
         else:
-            sets_repr = '[' + ', '.join(
-                f"data['{(self.t.sets.get(s) or SetInfo('', '')).data_key or s}']"
-                for s in ci.index_sets
-            ) + ']'
             names = []
             for s in ci.index_sets:
                 names.extend(self.r.names_for(s))
             names_repr = str(names)
-            self._emit(f"{idx_var} = pd.MultiIndex.from_product({sets_repr}, names={names_repr})")
+            has_tuple_set = any(
+                (self.t.sets.get(s) or SetInfo('', '')).dimen > 1
+                for s in ci.index_sets
+            )
+            if has_tuple_set:
+                # from_product would treat a tuple set as ONE level; enumerate
+                # the product explicitly, unpacking dimen>1 sets (as _emit_var does).
+                parts, loop_parts = [], []
+                for s in ci.index_sets:
+                    ns = self.r.names_for(s)
+                    if len(ns) > 1:
+                        loop_parts.append(f"({', '.join(ns)}) in {self._set_expr(s)}")
+                    else:
+                        loop_parts.append(f"{ns[0]} in {self._set_expr(s)}")
+                    parts.extend(ns)
+                self._emit(f"{idx_var} = pd.MultiIndex.from_tuples("
+                           f"[({', '.join(parts)}) for {' for '.join(loop_parts)}], names={names_repr})")
+            else:
+                sets_repr = '[' + ', '.join(self._set_expr(s) for s in ci.index_sets) + ']'
+                self._emit(f"{idx_var} = pd.MultiIndex.from_product({sets_repr}, names={names_repr})")
 
     # ------------------------------------------------------------------
     def _gen_P_inter_add(self, ci: ConstrInfo):
