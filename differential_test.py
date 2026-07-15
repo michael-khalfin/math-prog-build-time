@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import random
 from collections import Counter
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -231,27 +232,46 @@ def diff_fingerprints(a: dict, b: dict) -> list[str]:
 # Build both pipelines
 # ===========================================================================
 
+_REF_SOLVER = None
+
+
 def build_reference(model_fn: Callable, data: dict):
-    """Pyomo -> gurobi_persistent (the trusted reference model)."""
+    """Pyomo -> gurobi_persistent (the trusted reference model).
+
+    One persistent solver is shared across all calls: every fresh
+    SolverFactory('gurobi_persistent') creates a new Gurobi ENVIRONMENT, and
+    with a WLS (web-service) license each environment performs a network
+    license checkout.  Across the hundreds of reference builds in the suite
+    those checkouts dominate the wall time -- and stall for minutes when the
+    license server is slow.  set_instance() on a shared solver reuses the
+    already-checked-out environment.  Callers must finish reading the
+    returned gurobipy model before the next build_reference call."""
+    global _REF_SOLVER
     pm = model_fn(data)
-    opt = SolverFactory("gurobi_persistent")
-    opt.set_instance(pm)
-    g = opt._solver_model
+    if _REF_SOLVER is None:
+        _REF_SOLVER = SolverFactory("gurobi_persistent")
+    _REF_SOLVER.set_instance(pm)
+    g = _REF_SOLVER._solver_model
     g.update()
     return g
 
 
-_builder_cache: dict[int, Callable] = {}
+_builder_cache: dict[str, Callable] = {}
 
 
 def build_transpiled(model_fn: Callable, data: dict):
-    """translate(model_fn) -> build_vectorized_model(data)."""
-    key = id(model_fn)
-    if key not in _builder_cache:
+    """translate(model_fn) -> build_vectorized_model(data).
+
+    The cache is keyed on the GENERATED SOURCE, never on id(model_fn):
+    id() values are reused after garbage collection, so short-lived function
+    objects (e.g. from make_model_fn in a test loop) could silently collide
+    and return a different model's builder."""
+    code = translate(model_fn)
+    if code not in _builder_cache:
         ns: dict = {}
-        exec(compile(translate(model_fn), f"<transpiled:{model_fn.__name__}>", "exec"), ns)
-        _builder_cache[key] = ns["build_vectorized_model"]
-    g = _builder_cache[key](data)
+        exec(compile(code, f"<transpiled:{model_fn.__name__}>", "exec"), ns)
+        _builder_cache[code] = ns["build_vectorized_model"]
+    g = _builder_cache[code](data)
     g.update()
     return g
 
@@ -411,22 +431,111 @@ def verify(model_fn: Callable, data: dict, name: str = None,
 # Small sizes that preserve each problem's indexing structure but instantiate
 # in milliseconds.  Multiple seeds per size guard against a transpiler that is
 # only coincidentally correct on one data realization.
-SD_GRID = [dict(n_i=n_i, n_j=n_j, seed=s)
-           for (n_i, n_j) in [(3, 4), (6, 5), (10, 8), (15, 12)]
-           for s in range(3)]
-
-NF_GRID = [dict(n_nodes=nn, avg_degree=3, n_k=nk, seed=s)
-           for (nn, nk) in [(6, 2), (10, 3), (16, 4)]
-           for s in range(3)]
-
-BOM_GRID = [dict(n_p=n_p, n_c=n_c, n_t=n_t, seed=s)
-            for (n_p, n_c, n_t) in [(3, 5, 2), (6, 10, 3), (12, 20, 4)]
+# Each family spans tiny (structure-only) through ~10^3-10^4 variables: large
+# enough for irregularities (sparse collisions, repeated keys, uneven groups)
+# to actually occur, still fast enough that the reference builds in ~a second.
+SD_GRID = ([dict(n_i=n_i, n_j=n_j, seed=s)
+            for (n_i, n_j) in [(3, 4), (6, 5), (10, 8), (15, 12)]
             for s in range(3)]
+           + [dict(n_i=40, n_j=50, seed=s) for s in range(2)]      # 2,000 vars
+           + [dict(n_i=100, n_j=100, seed=s) for s in range(2)])   # 10,000 vars
+
+NF_GRID = ([dict(n_nodes=nn, avg_degree=3, n_k=nk, seed=s)
+            for (nn, nk) in [(6, 2), (10, 3), (16, 4)]
+            for s in range(3)]
+           + [dict(n_nodes=100, avg_degree=4, n_k=5, seed=s) for s in range(2)]    # ~2,000 vars
+           + [dict(n_nodes=250, avg_degree=4, n_k=10, seed=s) for s in range(2)])  # ~10,000 vars
+
+BOM_GRID = ([dict(n_p=n_p, n_c=n_c, n_t=n_t, seed=s)
+             for (n_p, n_c, n_t) in [(3, 5, 2), (6, 10, 3), (12, 20, 4)]
+             for s in range(3)]
+            + [dict(n_p=40, n_c=80, n_t=20, seed=s) for s in range(2)]      # 2,400 vars
+            + [dict(n_p=110, n_c=220, n_t=30, seed=s) for s in range(2)])   # 9,900 vars
+
+
+def gen_complex(n_e: int, n_ab: int, n_g: int, seed: int = 0) -> dict:
+    """Randomized instance for complex_pyomo_model, integrity-preserving by
+    construction: relations draw only from the declared pair set, groups
+    overlap (elements recur across keys -> objective multiplicity), and the
+    subset is a strict random sample."""
+    rng = random.Random(seed)
+    E = [f"e{k}" for k in range(n_e)]
+    a_pool = [f"a{k}" for k in range(max(2, n_ab // 3))]
+    b_pool = [f"b{k}" for k in range(max(2, n_ab // 4))]
+    pairs = set()
+    while len(pairs) < n_ab:
+        pairs.add((rng.choice(a_pool), rng.choice(b_pool)))
+    P = sorted(pairs)
+    G = [f"g{k}" for k in range(n_g)]
+    R = {g: rng.sample(P, k=rng.randint(2, min(5, len(P)))) for g in G}
+    S = sorted(rng.sample(P, k=max(1, int(0.4 * len(P)))))
+    CW = {p: round(rng.uniform(0.5, 5.0), 3) for p in P}
+    return {"E": E, "P": P, "G": G, "R": R, "S": S, "CW": CW,
+            "N0": 1, "N1": 2, "N2": 10}
+
+
+def complex_pyomo_model(data: dict):
+    """Stress model combining the transpiler's hardest features: mixed
+    1-D x 2-D product var, subset-restricted grouped sum, indexed-relation
+    sum, cross-dimensional balance, big-M affine rows, var-vs-var bound, and
+    a multi-term objective with param weights, relation multiplicity, a
+    subset term, and a scalar coefficient."""
+    import pyomo.environ as pyo
+    m = pyo.ConcreteModel()
+    m.E = pyo.Set(initialize=data["E"])
+    m.P = pyo.Set(initialize=data["P"], dimen=2)
+    m.G = pyo.Set(initialize=data["G"])
+    m.R = pyo.Set(m.G, dimen=2, initialize=data["R"])
+    m.S = pyo.Set(initialize=data["S"], dimen=2)
+    m.CW = pyo.Param(m.P, initialize=data["CW"])
+
+    m.z0 = pyo.Var(m.E, m.P, domain=pyo.Binary)
+    m.u = pyo.Var(m.P, domain=pyo.NonNegativeReals)
+    m.z5 = pyo.Var(m.E, domain=pyo.NonNegativeIntegers)
+    m.z6 = pyo.Var(m.E, domain=pyo.Binary)
+
+    def c0(m, e):                                   # subset-restricted grouped sum
+        return sum(m.z0[e, a, b] for (a, b) in m.S) == data["N0"]
+    m.c0 = pyo.Constraint(m.E, rule=c0)
+
+    def c1(m, e, g):                                # indexed-relation sum
+        return sum(m.z0[e, a, b] for (a, b) in m.R[g]) <= 1
+    m.c1 = pyo.Constraint(m.E, m.G, rule=c1)
+
+    def c2(m, e):                                   # cross-dimensional balance
+        return m.z5[e] == sum(m.z0[e, a, b] for (a, b) in m.P)
+    m.c2 = pyo.Constraint(m.E, rule=c2)
+
+    def c3(m, e):                                   # big-M affine rows
+        return m.z5[e] >= data["N1"] * m.z6[e]
+    m.c3 = pyo.Constraint(m.E, rule=c3)
+
+    def c4(m, e):
+        return m.z5[e] <= data["N1"] - 1 + data["N2"] * m.z6[e]
+    m.c4 = pyo.Constraint(m.E, rule=c4)
+
+    def c5(m, a, b):                                # var-vs-var with projection
+        return m.u[a, b] <= sum(m.z0[e, a, b] for e in m.E)
+    m.c5 = pyo.Constraint(m.P, rule=c5)
+
+    def obj(m):
+        return (sum(m.CW[a, b] * m.z0[e, a, b] for e in m.E for (a, b) in m.P)
+                - sum(m.u[a, b] for g in m.G for (a, b) in m.R[g])
+                + sum(m.u[a, b] for (a, b) in m.S)
+                - sum(0.5 * m.z6[e] for e in m.E))
+    m.obj = pyo.Objective(rule=obj, sense=pyo.maximize)
+    return m
+
+
+COMPLEX_GRID = ([dict(n_e=5, n_ab=8, n_g=3, seed=s) for s in range(3)]        # ~50 vars
+                + [dict(n_e=25, n_ab=40, n_g=8, seed=s) for s in range(2)]    # ~1,100 vars
+                + [dict(n_e=80, n_ab=120, n_g=15, seed=s) for s in range(2)]) # ~9,900 vars
 
 CANONICAL = [
     ("Supply-Demand (P1)",        bench.gen_supply_demand, bench.sd_pyomo_model,  SD_GRID),
     ("Network Flow (P1+P3)",      bench.gen_network_flow,  bench.nf_pyomo_model,  NF_GRID),
     ("Bill-of-Materials (P4+P6)", bench.gen_bom,           bench.bom_pyomo_model, BOM_GRID),
+    ("Complex (relations/affine/objective)", gen_complex,  complex_pyomo_model,   COMPLEX_GRID),
 ]
 
 
@@ -441,14 +550,18 @@ def run_data_parametric() -> list[str]:
         print(f"\n  {name}")
         for kwargs in grid:
             data = gen_fn(**kwargs)
+            shape = (0, 0)
             try:
-                ok, diffs = check_instance(model_fn, data)
+                fpr = fingerprint(build_reference(model_fn, data))
+                shape = fpr["shape"]
+                fpt = fingerprint(build_transpiled(model_fn, data))
+                diffs = diff_fingerprints(fpr, fpt)
+                ok = not diffs
             except Exception as e:
                 ok, diffs = False, [f"exception: {type(e).__name__}: {e}"]
-            ref = build_reference(model_fn, data)
             tag = f"{_size_label(kwargs):<34s}"
             if ok:
-                print(f"    [OK]   {tag}  ({ref.NumConstrs} constrs x {ref.NumVars} vars)")
+                print(f"    [OK]   {tag}  ({shape[0]} constrs x {shape[1]} vars)")
             else:
                 print(f"    [FAIL] {tag}")
                 for d in diffs:
@@ -472,7 +585,7 @@ EXAMPLE_MODULES = [
     "example_18_lhs_equality", "example_19_jk_secretary",
     "example_20_p3_name_mismatch", "example_21_p4_name_mismatch",
     "example_22_set_packing", "example_23_mixed_dimen", "example_24_complex",
-    "example_25_set_packing_2",
+    "example_25_set_packing_2", "example_26_objectives",
 ]
 
 
@@ -508,11 +621,7 @@ def run_negative_controls() -> list[str]:
     base_fp = fingerprint(build_reference(bench.sd_pyomo_model, data))
 
     def corrupt(kind):
-        m = bench.sd_pyomo_model(data)
-        opt = SolverFactory("gurobi_persistent")
-        opt.set_instance(m)
-        g = opt._solver_model
-        g.update()
+        g = build_reference(bench.sd_pyomo_model, data)   # shared env, no re-checkout
         if kind == "drop a constraint":
             g.remove(g.getConstrs()[0])
         elif kind == "tighten a bound":

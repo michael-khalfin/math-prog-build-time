@@ -73,6 +73,7 @@ class SumTermInfo:
     var_subscript_args: list = field(default_factory=list)  # args in m.var[a, b, c]
     param_subscript_args: list = field(default_factory=list)  # args in m.Param[a, b]
     fixed_subscripts: list = field(default_factory=list)   # [(pos, literal)] e.g. m.z5['H', c]
+    outer_comps: list = field(default_factory=list)  # [(targets, iter_set)] comps besides the binding one (objectives)
     scalar_coeff: float = 1.0   # constant multiplier e.g. 0.1 * var
     # Intra-sum linear combination: all (var_name, param_name, subscript_args, sign) terms
     # sign is +1 or -1; populated when elt is any linear combination of vars
@@ -413,10 +414,22 @@ class _Translator:
         sense = 'MINIMIZE'
         sense_kw = _extract_keyword(call, 'sense')
         if sense_kw is not None:
-            attr = _node_is_m_attr(sense_kw)
-            if attr is None and isinstance(sense_kw, ast.Attribute):
+            # Recognized spellings: pyo.maximize / pyo.minimize (Attribute),
+            # bare maximize/minimize (Name, from `from pyomo.environ import
+            # maximize`), and the numeric senses -1 (max) / 1 (min).
+            attr = None
+            if isinstance(sense_kw, ast.Attribute):
                 attr = sense_kw.attr
+            elif isinstance(sense_kw, ast.Name):
+                attr = sense_kw.id
             if attr and 'maximize' in attr.lower():
+                sense = 'MAXIMIZE'
+            elif (isinstance(sense_kw, ast.UnaryOp)
+                    and isinstance(sense_kw.op, ast.USub)
+                    and isinstance(sense_kw.operand, ast.Constant)
+                    and sense_kw.operand.value == 1):
+                sense = 'MAXIMIZE'
+            elif isinstance(sense_kw, ast.Constant) and sense_kw.value == -1:
                 sense = 'MAXIMIZE'
 
         self.obj = ObjInfo(pyomo_name=name, sense=sense)
@@ -722,16 +735,51 @@ class _RuleClassifier:
         return result
 
     def _parse_first_generator(self, node: ast.expr) -> list:
-        """Return a list with the first parseable SumTermInfo from a sum() call."""
+        """Return a list with one SumTermInfo parsed from a sum() call.
+
+        With multiple comprehensions, prefer the BINDING one — the comp whose
+        loop targets appear in the variable's subscript (for
+        ``sum(u[a,b] for g in G for (a,b) in R[g])`` that is the R[g] comp,
+        not the g one).  Comprehensions before the binding comp are recorded
+        on the term as ``outer_comps`` so codegen can account for key
+        enumeration (and hence element multiplicity across relation keys)."""
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == 'sum'):
             return []
         if not node.args or not isinstance(node.args[0], ast.GeneratorExp):
             return []
         gen_exp = node.args[0]
-        for comp in gen_exp.generators:
-            term = self._parse_comprehension(gen_exp.elt, comp)
+        sub_args = set()
+        if isinstance(gen_exp.elt, ast.Subscript):
+            sub_args = set(_extract_subscript_parts(gen_exp.elt)[0])
+        elif isinstance(gen_exp.elt, ast.BinOp):
+            for side in ast.walk(gen_exp.elt):
+                if isinstance(side, ast.Subscript):
+                    sub_args |= set(_extract_subscript_parts(side)[0])
+
+        def targets(comp):
+            t = comp.target
+            return {e.id for e in t.elts if isinstance(e, ast.Name)} \
+                if isinstance(t, ast.Tuple) else {t.id} if isinstance(t, ast.Name) else set()
+
+        comps = list(gen_exp.generators)
+        binding_i = None
+        for i in reversed(range(len(comps))):
+            if targets(comps[i]) & sub_args:
+                binding_i = i
+                break
+        order = ([binding_i] + [i for i in range(len(comps)) if i != binding_i]
+                 if binding_i is not None else list(range(len(comps))))
+        for i in order:
+            term = self._parse_comprehension(gen_exp.elt, comps[i])
             if term is not None:
+                for j, comp in enumerate(comps):
+                    if j == i:
+                        continue
+                    it = comp.iter
+                    it_set = _node_is_m_attr(it)
+                    if it_set:
+                        term.outer_comps.append((sorted(targets(comp)), it_set))
                 return [term]
         return []
 
@@ -1194,7 +1242,52 @@ class _CodeGen:
             coeff = term.scalar_coeff
             c_var = f'_c_obj_t{i}'
 
-            if pi and pi.index_sets:
+            if term.iter_is_indexed and term.outer_comps:
+                # Nested relation sum, e.g. sum(u[a,b] for g in G for (a,b)
+                # in R[g]).  An element appearing under several keys must get
+                # its MULTIPLICITY as its coefficient, so the coefficient
+                # vector is a count over the flattened relation, enumerated
+                # key-by-key exactly as the written loop does.
+                if pi:
+                    raise NotImplementedError(
+                        f"objective term over {term.iter_set}[...]: param-weighted "
+                        "nested relation sums are not supported yet")
+                si_rel = self.t.sets.get(term.iter_set)
+                key_args = (list(term.iter_index_arg)
+                            if isinstance(term.iter_index_arg, tuple)
+                            else [term.iter_index_arg])
+                outer = next((o for o in term.outer_comps
+                              if sorted(o[0]) == sorted(key_args)), None)
+                if outer is None or si_rel is None:
+                    raise NotImplementedError(
+                        f"objective term over {term.iter_set}[...]: relation key "
+                        "is not bound by an enclosing comprehension")
+                loop = (term.loop_var if isinstance(term.loop_var, list)
+                        else [term.loop_var])
+                all_names = self.r.all_names_for_var(vi) if vi else []
+                cols = [all_names[k] for k, a in enumerate(term.var_subscript_args)
+                        if a in loop and k < len(all_names)]
+                if len(cols) != (si_rel.dimen or 1):
+                    raise NotImplementedError(
+                        f"objective term over {term.iter_set}[...]: loop variables "
+                        "must cover the relation's full dimension")
+                keys_expr = self._set_expr(outer[1])
+                rel_expr = f"data['{si_rel.data_key}']"
+                if new_data:
+                    keys_expr = keys_expr.replace('data[', f'{d}[')
+                    rel_expr = rel_expr.replace('data[', f'{d}[')
+                pairs, cnt = f'_pairs_obj_t{i}', f'_cnt_obj_t{i}'
+                self._emit(f"{pairs} = [_t for _k in {keys_expr} for _t in {rel_expr}[_k]]")
+                self._emit(f"{cnt} = pd.Series({pairs}).value_counts()")
+                if len(cols) == 1:
+                    proj = f"{idx_v}.get_level_values('{cols[0]}')"
+                else:
+                    proj = ('zip(' + ', '.join(
+                        f"{idx_v}.get_level_values('{c}')" for c in cols) + ')')
+                self._emit(f"{c_var} = np.array([{cnt}.get(_t, 0.0) for _t in {proj}], dtype=float)")
+                if coeff != 1.0:
+                    self._emit(f"{c_var} = {c_var} * {coeff}")
+            elif pi and pi.index_sets:
                 param_s = f's_{pi.pyomo_name.lower()}'
                 param_col = pi.pyomo_name.lower()
                 param_dims = []
