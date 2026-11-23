@@ -1,0 +1,31 @@
+% Numbers from epidemic-model/bench_iterative.py (run 2026-11-22).
+
+\subsection{Case Study: Iterating on an Epidemic Model}
+\label{sec:results-epidemic}
+
+A model is rarely built once: it is rebuilt whenever the data or the formulation changes, so any saving in construction is repaid at every iteration. To distinguish this setting from the canonical families, we use a large, data-driven model from a separate project we are actively developing: a mixed-integer model of disease spread on a measured contact network.
+
+\paragraph{Data and Model.} We use the first day ($|T| = 4{,}320$ twenty-second slots) of the SocioPatterns high-school contact records for 180 students \cite{fournet2014contact}. Binary variables $y_{it}$ and $x_{it}$ record whether student $i$ is infected, and whether it is infectious, at slot $t$. Each student is infected at most once, and $C$ students are infected at the first slot. A student infected at slot $t'$ is infectious during $[t'+L,\, t'+U]$, so $x_{it}$ is a sliding-window sum of $y_{it'}$. Every later infection of $i$ at slot $t$ must come from a contact with an infectious student $j$ at a slot $s$ with $t-s \in [\underline{\tau}, \bar{\tau}]$. A third binary variable $a_{ijt}$, defined only on the set $A$ of triples $(i,j,t)$ for which such a contact exists, records that $i$ was infected at $t$ through $j$. Linear constraints make $a_{ijt}$ the conjunction of $y_{it}$ and the $x_{js}$ of those contacts, and require every later infection to have at least one. The objective maximizes the number of students infected after slot $F$. The full formulation is given in our code. We use $C = 3$, $L = \underline{\tau} = 12$, $\bar{\tau} = 48$, and $F = 2{,}160$, the middle of the day. As in the bill-of-materials model, every index set is computed from the contact records before the model is built. The model is a demanding test for the transpiler: it combines a sliding-window sum, sums over sparse indexed relations, and a linearized conjunction over four-index tuples, and its size is set by the data rather than by a generator. The transpiled model matched the Pyomo reference on 15 reduced instances.
+
+\paragraph{An Iterative Workflow.} The infectious period $U$ is among the least certain parameters of an epidemic model, so a natural analysis solves the model for a range of values, here $U \in \{48, 72, \dots, 168\}$. Changing $U$ changes the infectious windows, so each value gives a new model, and every pipeline must rebuild it. Every instance has the same variables and constraints, and the number of nonzeros grows with the window. \autoref{tab:epidemic} reports construction time for each value of $U$. Construction time grows with the number of nonzeros in every pipeline, while the ratio between pipelines stays nearly constant across the sweep. The absolute saving therefore grows linearly with the number of models an analysis requires.
+
+\begin{table}[tb]
+\centering
+\caption{Construction time in seconds for each model in a sweep of the infectious period $U$ on one day of contact data ($1.71$ million variables, $2.60$ million constraints)}
+\label{tab:epidemic}
+\footnotesize
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+$U$ & Nonzeros (millions) & Pyomo & Pyomo+Template & COO+MVar \\
+\midrule
+48  & 34.5  & 92.7  & 14.2 & 7.0 \\
+72  & 52.9  & 123.7 & 15.6 & 7.7 \\
+96  & 71.2  & 153.2 & 18.4 & 9.2 \\
+120 & 89.4  & 179.7 & 20.3 & 10.3 \\
+144 & 107.5 & 206.7 & 24.6 & 11.8 \\
+168 & 125.4 & 230.8 & 26.9 & 13.9 \\
+\midrule
+Total & & 986.8 & 120.0 & 59.8 \\
+\bottomrule
+\end{tabular}
+\end{table}

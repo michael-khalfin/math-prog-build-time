@@ -1,0 +1,30 @@
+\definecolor{ink}{HTML}{2B2A27}
+\definecolor{card}{HTML}{FAF9F5}
+\definecolor{edge}{HTML}{B9B5AA}
+\definecolor{panel}{HTML}{F2F0E8}
+\definecolor{clay}{HTML}{D97757}
+\definecolor{claytint}{HTML}{F6E3DA}
+\definecolor{okfill}{HTML}{E3EFE1}
+\definecolor{okedge}{HTML}{6E9A68}
+\definecolor{errfill}{HTML}{F7E1DE}
+\definecolor{erredge}{HTML}{B5574B}
+\definecolor{blufill}{HTML}{E2E9F3}
+\definecolor{bluedge}{HTML}{6B86AE}
+\tikzset{
+  every node/.style={font=\fontfamily{phv}\fontsize{8}{9.5}\selectfont, text=ink},
+  card/.style={draw=edge, fill=card, rounded corners=2.5pt, line width=0.5pt, align=center, inner xsep=4pt, inner ysep=3pt, minimum height=7mm, minimum width=20mm},
+  inputc/.style={card, fill=blufill, draw=bluedge},
+  hot/.style={card, fill=claytint, draw=clay, line width=0.8pt},
+  ok/.style={card, fill=okfill, draw=okedge},
+  err/.style={card, fill=errfill, draw=erredge},
+  test/.style={card, fill=card, draw=ink, line width=0.7pt},
+  panel/.style={fill=panel, rounded corners=4pt, inner sep=5pt},
+  ptitle/.style={font=\fontfamily{phv}\bfseries\fontsize{7}{8}\selectfont, text=ink!75, anchor=north west, inner sep=0pt},
+  lab/.style={font=\fontfamily{phv}\fontsize{7}{8}\selectfont, text=ink!80, fill=white, inner sep=1.2pt, rounded corners=1pt},
+  flow/.style={-{Stealth[length=1.8mm,width=1.3mm]}, line width=0.6pt, draw=ink!70},
+  loop/.style={-{Stealth[length=1.8mm,width=1.3mm]}, line width=0.6pt, draw=ink!55, dashed, dash pattern=on 2pt off 1.5pt, rounded corners=3pt},
+}
+\tikzset{agentc/.style={card, fill=claytint, draw=clay, line width=0.8pt},
+  testc/.style={card, draw=ink!80, line width=0.7pt, fill=white}}
+\tikzset{decide/.style={diamond, draw=ink!80, fill=white, line width=0.6pt, aspect=1.9, inner sep=0.6pt, font=\fontfamily{phv}\fontsize{7}{8}\selectfont, align=center},
+  blab/.style={font=\fontfamily{phv}\fontsize{7}{8}\selectfont, text=ink!80, inner sep=1pt}}

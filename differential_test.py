@@ -460,8 +460,12 @@ def gen_complex(n_e: int, n_ab: int, n_g: int, seed: int = 0) -> dict:
     subset is a strict random sample."""
     rng = random.Random(seed)
     E = [f"e{k}" for k in range(n_e)]
-    a_pool = [f"a{k}" for k in range(max(2, n_ab // 3))]
-    b_pool = [f"b{k}" for k in range(max(2, n_ab // 4))]
+    n_a = max(2, n_ab // 3)
+    # b_pool must allow at least n_ab distinct (a, b) pairs, or the loop below
+    # never terminates (n_ab = 8 gave a 2 x 2 pool).  Larger n_ab are unaffected.
+    n_b = max(2, n_ab // 4, -(-n_ab // n_a))
+    a_pool = [f"a{k}" for k in range(n_a)]
+    b_pool = [f"b{k}" for k in range(n_b)]
     pairs = set()
     while len(pairs) < n_ab:
         pairs.add((rng.choice(a_pool), rng.choice(b_pool)))

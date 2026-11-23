@@ -1,56 +1,32 @@
-\begin{tikzpicture}[
-    % --- Global Styles ---
-    base/.style={draw, thick, align=center, minimum height=0.8cm, minimum width=2.5cm, font=\sffamily},
-    data/.style={base, trapezium, trapezium left angle=75, trapezium right angle=105, fill=blue!5},
-    source/.style={base, ellipse, fill=blue!5},
-    process/.style={base, rectangle, rounded corners, fill=gray!10},
-    % Changed the bottleneck to Orange to distinguish it from the Red error state
-    bottleneck/.style={process, fill=orange!15, draw=orange!90!black, thick}, 
-    decision/.style={base, diamond, fill=yellow!15, aspect=2, inner sep=2pt},
-    success/.style={base, ellipse, fill=green!15},
-    error/.style={base, rectangle, fill=red!10, draw=red!80!black},
-    container/.style={draw, dashed, rounded corners, inner sep=15pt, fill=gray!5},
-    arrow/.style={->, >=stealth, thick, color=black!80},
-    dashed arrow/.style={->, >=stealth, thick, dashed, color=black!80}
-]
-
-    % --- Nodes & Absolute Positioning ---
-    
-    \node[source] (source) {Source code of\\Pyomo model};
-    \node[data, right=1.0cm of source] (data) {User-provided data};
-
-    \node[bottleneck, below=2.5cm of $(source)!0.5!(data)$] (build) {Build Pyomo model};
-    \node[process, below=0.8cm of build] (translate) {Translate to Gurobi};
-    \node[process, below=0.8cm of translate] (solve) {Solve with Gurobi};
-
-    \node[decision, below=2cm of solve] (feedback) {Result};
-    \node[success, below left=1.2cm and 0.8cm of feedback] (sol) {Receive solution};
-    \node[error, below right=1.2cm and 1.5cm of feedback] (nosol) {Error: Infeasible\\or unbounded};
-
-    % --- Subgraph Bounding Boxes ---
-    % yshift added to ensure the label sits slightly above the dashed line
-    \begin{scope}[on background layer]
-        \node[container, fit=(source)(data), label={[font=\sffamily\bfseries, xshift=-2mm, yshift=2mm]above left:Writing Code}] (writing) {};
-        \node[container, fit=(build)(translate)(solve), label={[font=\sffamily\bfseries, xshift=-2mm, yshift=2mm]above left:Running Code}] (running) {};
-        \node[container, fit=(feedback)(sol)(nosol), label={[font=\sffamily\bfseries, xshift=-2mm, yshift=2mm]above left:Output \& Feedback}] (output) {};
-    \end{scope}
-
-    % --- Forward Flow Logic ---
-    \draw[arrow] (source) -- (build);
-    \draw[arrow] (data) -- (build);
-    \draw[arrow] (build) -- (translate);
-    \draw[arrow] (translate) -- (solve);
-    \draw[arrow] (solve) -- (feedback);
-    
-    \draw[arrow] (feedback) -| node[above, near start, font=\sffamily\small] {Feasible} (sol);
-    \draw[arrow] (feedback) -| node[above, near start, font=\sffamily\small] {Infeasible/Unbounded} (nosol);
-
-    % --- Explicit Feedback Loops ---
-    
-    % Route 1: Out the right, pushed 2.5cm wide. Label moved to the vertical climb (pos=0.25).
-    \draw[dashed arrow] (nosol.east) -- ++(2.5,0) |- node[pos=0.25, right, font=\sffamily\small] {Iterate data} (data.east);
-    
-    % Route 2: Out the bottom, dropped 1cm down, swept 10cm left. Label moved to the vertical climb (pos=0.25).
-    \draw[dashed arrow] (nosol.south) -- ++(0,-1.0) -| ++(-10,0) |- node[pos=0.25, left, font=\sffamily\small] {Iterate model} (source.west);
-
+\begin{tikzpicture}
+% rows: titles at 0, cards at -7mm, -16mm, -25mm
+\node[inputc] (source) at (0,-12mm) {Pyomo model\\(source code)};
+\node[inputc] (data)   at (0,-25mm) {User-provided\\data};
+\node[hot]  (build)     at (35mm,-9.5mm)  {Build Pyomo model};
+\node[card] (translate) at (35mm,-18.5mm) {Translate to Gurobi};
+\node[card] (solve)     at (35mm,-27.5mm) {Solve with Gurobi};
+\node[decide] (dec) at (62mm,-27.5mm) {Feasible?};
+\node[ok]  (sol)   at (86mm,-9.5mm)  {Receive solution};
+\node[err] (nosol) at (86mm,-27.5mm) {Infeasible or\\unbounded};
+\coordinate (top) at (0,-1.5mm); \coordinate (bot) at (0,-32mm);
+\begin{scope}[on background layer]
+\node[panel, fit=(source)(data)(source|-top)(data|-bot), inner ysep=0pt] (P1) {};
+\node[panel, fit=(build)(solve)(build|-top)(solve|-bot), inner ysep=0pt] (P2) {};
+\node[panel, fit=(dec)(sol)(nosol)(sol|-top)(nosol|-bot), inner ysep=0pt] (P3) {};
+\end{scope}
+\node[ptitle] at ([xshift=3pt,yshift=-2.5pt]P1.north west) {Writing code};
+\node[ptitle] at ([xshift=3pt,yshift=-2.5pt]P2.north west) {Running code};
+\node[ptitle] at ([xshift=3pt,yshift=-2.5pt]P3.north west) {Output \& feedback};
+% forward flow
+\coordinate (j) at ($(P1.east)!0.5!(P2.west)$);
+\draw[flow] (source.east) -| (j |- build) -- (build.west);
+\draw[flow, -] (data.east) -| (j |- build);
+\draw[flow] (build) -- (translate);
+\draw[flow] (translate) -- (solve);
+\draw[flow] (solve) -- (dec);
+\draw[flow] (dec.north) |- node[blab, pos=0.25, left] {yes} (sol.west);
+\draw[flow] (dec) -- node[blab, above] {no} (nosol);
+% feedback loops
+\draw[loop] (nosol.east) -| ([xshift=4mm]P3.east |- top) |- ([yshift=4mm]P2.north) -| node[lab, pos=0.1] {iterate model} ([xshift=-4mm]P1.west |- source) -- (source.west);
+\draw[loop] (nosol.south) |- node[lab, pos=0.75] {iterate data} ([yshift=-4mm]P2.south) -| (data.south);
 \end{tikzpicture}

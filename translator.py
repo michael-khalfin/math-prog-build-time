@@ -244,33 +244,60 @@ class _Translator:
         self._param_order: list[str] = []
 
     # ------------------------------------------------------------------
+    _SUPPORTED_COMPONENTS = ('Set', 'Param', 'Var', 'Constraint', 'Objective')
+
+    @staticmethod
+    def _unsupported(stmt, why: str):
+        """Refuse a statement the transpiler does not translate.  Silently
+        skipping it would build a model that differs from Pyomo's."""
+        line = getattr(stmt, 'lineno', '?')
+        raise NotImplementedError(
+            f"unsupported statement in the model function (line {line} of the "
+            f"function source): {why}: {ast.unparse(stmt)[:120]!r}")
+
     def parse(self):
         for stmt in self.func_def.body:
             if isinstance(stmt, ast.FunctionDef):
                 self._rules[stmt.name] = stmt
             elif isinstance(stmt, ast.Assign):
                 self._parse_assignment(stmt)
+            elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                continue
+            elif (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant)
+                  and isinstance(stmt.value.value, str)):
+                continue                                    # docstring
+            elif (isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Name)
+                  and stmt.value.id == 'm'):
+                continue
+            else:
+                self._unsupported(stmt, f"{type(stmt).__name__} statement")
 
     def _parse_assignment(self, stmt: ast.Assign):
-        # Target must be m.X
+        # Accepted forms:  m = pyo.ConcreteModel()   and   m.X = pyo.K(...)
         if len(stmt.targets) != 1:
-            return
+            self._unsupported(stmt, "multiple assignment targets")
         tgt = stmt.targets[0]
-        if not isinstance(tgt, ast.Attribute):
+        val = stmt.value
+        if (isinstance(tgt, ast.Name) and tgt.id == 'm' and isinstance(val, ast.Call)
+                and ast.unparse(val.func) == 'pyo.ConcreteModel' and not val.args
+                and not val.keywords):
             return
-        if not (isinstance(tgt.value, ast.Name) and tgt.value.id == 'm'):
-            return
+        if not (isinstance(tgt, ast.Attribute) and isinstance(tgt.value, ast.Name)
+                and tgt.value.id == 'm'):
+            self._unsupported(stmt, "assignment target is not a model attribute m.X")
         attr_name = tgt.attr
 
-        val = stmt.value
         if not isinstance(val, ast.Call):
-            return
+            self._unsupported(stmt, "right-hand side is not a pyo component call")
         func = val.func
         # Must be pyo.Something
         if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
                 and func.value.id == 'pyo'):
-            return
+            self._unsupported(stmt, "right-hand side is not a pyo component call")
         kind = func.attr
+        if kind not in self._SUPPORTED_COMPONENTS:
+            self._unsupported(stmt, f"pyo.{kind} is not supported "
+                                    f"(supported: {', '.join(self._SUPPORTED_COMPONENTS)})")
 
         if kind == 'Set':
             self._parse_set(attr_name, val)
@@ -1305,7 +1332,14 @@ class _CodeGen:
                 elif len(param_dims) == 1:
                     self._emit(f"{c_var} = {param_s}.reindex({idx_v}, level='{param_dims[0]}').values")
                 else:
-                    self._emit(f"{c_var} = {param_s}.reindex({idx_v}).values")
+                    # Param indexed by a strict subset of the variable's levels,
+                    # e.g. CW[a,b] * z0[e,a,b]: project the variable index onto
+                    # the param's levels, then look up.  (A plain reindex of a
+                    # 2-level Series by a 3-level index matches nothing -> NaN.)
+                    names_repr = '[' + ', '.join(f"'{n}'" for n in param_dims) + ']'
+                    self._emit(f"{c_var} = {param_s}.reindex(pd.MultiIndex.from_arrays("
+                               f"[{idx_v}.get_level_values(_n) for _n in {names_repr}], "
+                               f"names={names_repr})).values")
                 if coeff != 1.0:
                     self._emit(f"{c_var} = {c_var} * {coeff}")
             elif pi and not pi.index_sets:

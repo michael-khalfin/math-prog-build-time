@@ -20,3 +20,6 @@ benchmark_run.log
 *.synctex.gz
 *.bbl
 *.blg
+
+# Local paper drafts, marked revisions, and backups (not part of the release)
+paper/_archive/

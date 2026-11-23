@@ -1,69 +1,36 @@
-\begin{tikzpicture}[
-    % --- STYLES ---
-    base/.style={draw, thick, align=center, minimum height=0.8cm, minimum width=2.5cm, font=\sffamily},
-    data/.style={base, trapezium, trapezium left angle=75, trapezium right angle=105, fill=blue!5},
-    source/.style={base, ellipse, fill=blue!5},
-    process/.style={base, rectangle, rounded corners, fill=gray!10},
-    bottleneck/.style={process, fill=orange!15, draw=orange!90!black, thick},
-    decision/.style={base, diamond, fill=yellow!15, aspect=2, inner sep=2pt},
-    success/.style={base, ellipse, fill=green!15},
-    error/.style={base, rectangle, fill=red!10, draw=red!80!black},
-    container/.style={draw, dashed, rounded corners, inner sep=18pt, fill=gray!5},
-    arrow/.style={->, >=stealth, thick, color=black!80},
-    dashed arrow/.style={->, >=stealth, thick, dashed, color=black!80}
-]
-
-    % --- NODES ---
-    
-    % Phase 1: Writing Code (Loosened vertical spacing to 1.2cm)
-    \node[source] (code1) {Code \#1:\\Pyomo model};
-    \node[process, below=1.2cm of code1] (transpile) {Run transpilation};
-    \node[source, below=1.2cm of transpile] (code2) {Code \#2:\\Direct CVaR Gurobi};
-    
-    % Pushed data wider to 2.5cm for breathing room
-    \node[data, right=2.5cm of code2] (data) {User-provided data};
-
-    % Phase 2: Running Code (Dropped 2.5cm below Phase 1)
-    \node[process, below=3.5cm of $(code2)!0.5!(data)$] (build) {Build Gurobi};
-    \node[process, below=1.2cm of build] (solve) {Solve with Gurobi};
-
-    % Phase 3: Output & Feedback (Dropped 2.5cm below Phase 2)
-    \node[decision, below=2.5cm of solve] (feedback) {Result};
-    \node[success, below left=1.5cm and 0.8cm of feedback] (sol) {Receive solution};
-    \node[error, below right=1.5cm and 1.5cm of feedback] (nosol) {Error: Infeasible\\ or unbounded};
-    
-    \node[process, below=1.5cm of sol] (optpyomo) {Build Pyomo\\model retroactively};
-
-    % --- SUBGRAPHS ---
-    \begin{scope}[on background layer]
-        \node[container, fit=(code1)(transpile)(code2)(data), label={[font=\sffamily\bfseries, xshift=-2mm,yshift=2mm]above left:Writing Code}] (phase1) {};
-        \node[container, fit=(build)(solve), label={[font=\sffamily\bfseries, xshift=-2mm, yshift=2mm]above left:Running Code}] (phase2) {};
-        \node[container, fit=(feedback)(sol)(nosol)(optpyomo), label={[font=\sffamily\bfseries, xshift=-2mm, yshift=2mm]above left:Output \& Feedback}] (phase3) {};
-    \end{scope}
-
-    % --- FORWARD FLOW ---
-    \draw[arrow] (code1) -- (transpile);
-    \draw[arrow] (transpile) -- (code2);
-    
-    % V-Funnel into Build
-    \draw[arrow] (code2) -- (build);
-    \draw[arrow] (data) -- (build);
-    
-    \draw[arrow] (build) -- (solve);
-    \draw[arrow] (solve) -- (feedback);
-    
-    \draw[arrow] (feedback) -| node[above, near start, font=\sffamily\small] {Feasible} (sol);
-    \draw[arrow] (feedback) -| node[above, near start, font=\sffamily\small] {Infeasible/Unbounded} (nosol);
-
-    \draw[arrow] (sol) -- (optpyomo);
-
-    % --- FEEDBACK LOOPS ---
-    
-    % Right Loop: Iterating Data (Pushed wider to ++(3.5,0) so it stays well clear of the boxes)
-    \draw[dashed arrow] (nosol.east) -- ++(3.5,0) |- node[pos=0.25, right, font=\sffamily\small] {Iterate data} (data.east);
-    
-    % Left Loop: Iterating Pyomo Model 
-    % Dropped lower to ++(0,-2.5) to cleanly sweep under the Optional Pyomo block, and swept wider left to ++(-11,0)
-    \draw[dashed arrow] (nosol.south) -- ++(0,-3.5) -| ++(-11,0) |- node[pos=0.25, left, font=\sffamily\small] {Iterate Pyomo model} (code1.west);
-
+\begin{tikzpicture}
+% rows: R1 -9.5mm, R2 -20mm, R3 -30.5mm, R4 -41mm
+\node[inputc] (code1) at (0,-9.5mm) {Code \#1:\\Pyomo model};
+\node[card] (transpile) at (0,-20mm) {Run transpilation};
+\node[inputc] (code2) at (0,-30.5mm) {Code \#2:\\Gurobi-native code};
+\node[inputc] (data) at (0,-41mm) {User-provided\\data};
+\node[card] (build) at (31mm,-20mm) {Build Gurobi\\model};
+\node[card] (solve) at (31mm,-30.5mm) {Solve with\\Gurobi};
+\node[decide] (dec) at (56mm,-30.5mm) {Feasible?};
+\node[ok]  (sol)   at (81mm,-9.5mm) {Receive solution};
+\node[card] (retro) at (81mm,-20mm) {Build Pyomo model\\retroactively};
+\node[err] (nosol) at (81mm,-30.5mm) {Infeasible or\\unbounded};
+\coordinate (top) at (0,-1.5mm); \coordinate (bot) at (0,-45.5mm);
+\begin{scope}[on background layer]
+\node[panel, fit=(code1)(code2)(data)(code1|-top)(data|-bot), inner ysep=0pt] (P1) {};
+\node[panel, fit=(build)(solve)(build|-top)(solve|-bot), inner ysep=0pt] (P2) {};
+\node[panel, fit=(dec)(sol)(retro)(nosol)(sol|-top)(nosol|-bot), inner ysep=0pt] (P3) {};
+\end{scope}
+\node[ptitle] at ([xshift=3pt,yshift=-2.5pt]P1.north west) {Writing code};
+\node[ptitle] at ([xshift=3pt,yshift=-2.5pt]P2.north west) {Running code};
+\node[ptitle] at ([xshift=3pt,yshift=-2.5pt]P3.north west) {Output \& feedback};
+% forward flow
+\draw[flow] (code1) -- (transpile);
+\draw[flow] (transpile) -- (code2);
+\coordinate (j) at ($(P1.east)!0.5!(P2.west)$);
+\draw[flow] (code2.east) -| (j |- build) -- (build.west);
+\draw[flow, -] (data.east) -| (j |- build);
+\draw[flow] (build) -- (solve);
+\draw[flow] (solve) -- (dec);
+\draw[flow] (dec.north) |- node[blab, pos=0.25, left] {yes} (sol.west);
+\draw[flow] (dec) -- node[blab, above] {no} (nosol);
+\draw[flow] (sol) -- (retro);
+% feedback loops
+\draw[loop] (nosol.east) -| ([xshift=4mm]P3.east |- top) |- ([yshift=4mm]P2.north) -| node[lab, pos=0.1] {iterate Pyomo model} ([xshift=-4mm]P1.west |- code1) -- (code1.west);
+\draw[loop] (nosol.south) |- node[lab, pos=0.75] {iterate data} ([yshift=-4mm]P2.south) -| (data.south);
 \end{tikzpicture}
